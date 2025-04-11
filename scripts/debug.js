@@ -27,8 +27,9 @@ const buildScripts = {
 
 if (Object.prototype.hasOwnProperty.call(buildScripts, process.arch)) {
   // on Windows, npm is actually `npm.cmd`
-  const npm = /^win/.test(process.platform) ? 'npm.cmd' : 'npm';
-  run(`${npm} ${buildScripts[process.arch]}`);
+  const packageManager = process.env.npm_execpath?.includes('bun') ? 'bun' :
+    /^win/.test(process.platform) ? 'npm.cmd' : 'npm';
+  run(`${packageManager} ${buildScripts[process.arch]}`);
 } else {
   console.log('Unfamiliar architecture detected, this library is probably not compatible with your OS.');
   run('node-gyp --debug configure rebuild');
