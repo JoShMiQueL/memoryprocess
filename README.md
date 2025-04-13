@@ -1,7 +1,9 @@
 <p align="center">
   <img width="600" src="assets/logo.png">
   <br>
-  <code>memoryjs</code> is a an NPM package to read and write process memory!
+  <code>memoryjs</code> is an NPM package to read and write process memory, now with Bun.js support!
+  <br><br>
+  This is a fork of the original <a href="https://github.com/Rob--/memoryjs">memoryjs</a> package, maintained by <a href="https://github.com/JoShMiQueL">JoShMiQueL</a> with added Bun.js support.
 </p>
 
 <p align="center">
@@ -37,21 +39,28 @@
 - Hardware breakpoints (find out what accesses/writes to this address, etc)
 - Inject & unload DLLs
 - Read memory mapped files
+- ESModule support
+- Full TypeScript support with built-in type definitions
 
 TODO:
 - WriteFile support (for driver interactions)
 - Async/await support
+- Migrate to [Bun's C API](https://bun.sh/blog/compile-and-run-c-in-js) to remove node-gyp dependency for Bun users
 
 # Getting Started
 
 ## Install
 
-This is a Node add-on (last tested to be working on `v14.15.0`) and therefore requires [node-gyp](https://github.com/nodejs/node-gyp) to use.
+This is a Node add-on (last tested to be working on Node.js `v14.15.0` and Bun.js `v1.0.25`) and requires [node-gyp](https://github.com/nodejs/node-gyp) to build the native modules.
 
-You may also need to [follow these steps](https://github.com/nodejs/node-gyp#user-content-installation) to install and setup `node-gyp`.
+Both Node.js and Bun.js users need to [follow these steps](https://github.com/nodejs/node-gyp#user-content-installation) to install and setup `node-gyp`.
 
 ```bash
+# Using npm
 npm install memoryjs
+
+# Using bun
+bun add memoryjs
 ```
 
 When using memoryjs, the target process should match the platform architecture of the Node version running.
@@ -60,14 +69,21 @@ For example if you want to target a 64 bit process, you should try and use a 64 
 You also need to recompile the library and target the platform you want. Head to the memoryjs node module directory, open up a terminal and run one of the following compile scripts:
 
 ```bash
-# will automatically compile based on the detected Node architecture
+# Using npm - will automatically compile based on the detected Node architecture
 npm run build
+
+# Using bun - will automatically compile based on the detected Node architecture
+bun run build
 
 # compile to target 32 bit processes
 npm run build32
+# or with bun
+bun run build32
 
 # compile to target 64 bit processes
 npm run build64
+# or with bun
+bun run build64
 ```
 
 ## Node Webkit / Electron
@@ -76,10 +92,43 @@ If you are planning to use this module with Node Webkit or Electron, take a look
 
 # Usage
 
-## Initialise
+## Import
 ``` javascript
+// CommonJS
 const memoryjs = require('memoryjs');
+
+// ESModule
+import memoryjs from 'memoryjs';
+
+// TypeScript
+import memoryjs, { ProcessObject, ModuleObject } from 'memoryjs';
+
+// Initialize
 const processName = "csgo.exe";
+const process = memoryjs.openProcess(processName);
+```
+
+## TypeScript Support
+The package includes built-in TypeScript definitions. All functions, objects, and constants are fully typed:
+
+```typescript
+// Types are available for all returned objects
+const process: ProcessObject = memoryjs.openProcess(processName);
+const module: ModuleObject = memoryjs.findModule('kernel32.dll', process.th32ProcessID);
+
+// Enums and constants are also typed
+import { DataType, ProtectionFlags } from 'memoryjs';
+
+// Read memory with type safety
+const value: number = memoryjs.readMemory(process.handle, address, DataType.INT);
+
+// Protection flags with TypeScript enums
+const oldProtection = memoryjs.virtualProtectEx(
+  process.handle,
+  address,
+  size,
+  ProtectionFlags.PAGE_EXECUTE_READWRITE
+);
 ```
 
 ## Processes
