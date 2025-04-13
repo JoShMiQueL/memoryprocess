@@ -1,8 +1,9 @@
 {
   "name": "@joshmiquel/memoryjs",
-  "version": "3.5.2",
+  "version": "3.5.3",
   "description": "Maintained fork of memoryjs with critical fixes. Includes /Zc:strictStrings compiler fixes and other improvements. Original package by Rob--",
   "main": "index.js",
+  "types": "index.d.ts",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "install": "npm run build",
