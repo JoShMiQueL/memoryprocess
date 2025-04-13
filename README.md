@@ -42,10 +42,19 @@
 - ESModule support
 - Full TypeScript support with built-in type definitions
 
-TODO:
+## Future Plans
+
+This fork is actively working on migrating the project to be a native Bun.js package, which will bring several improvements:
+
+- Native compilation using Bun's C API instead of node-gyp
+- Better performance through Bun's optimizations
+- Simplified installation process
+- Enhanced TypeScript support
+
+## TODO
 - WriteFile support (for driver interactions)
 - Async/await support
-- Migrate to [Bun's C API](https://bun.sh/blog/compile-and-run-c-in-js) to remove node-gyp dependency for Bun users
+- Migrate to [Bun's C API](https://bun.sh/blog/compile-and-run-c-in-js) to remove node-gyp dependency
 
 # Getting Started
 
