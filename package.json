@@ -1,7 +1,7 @@
 {
-  "name": "memoryjs",
-  "version": "3.5.1",
-  "description": "Node add-on for memory reading and writing!",
+  "name": "@joshmiquel/memoryjs",
+  "version": "3.5.2",
+  "description": "Maintained fork of memoryjs with critical fixes. Includes /Zc:strictStrings compiler fixes and other improvements. Original package by Rob--",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
@@ -16,22 +16,31 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Rob--/memoryjs.git"
+    "url": "git+https://github.com/JoShMiQueL/memoryjs.git"
   },
   "keywords": [
     "memory",
     "reading",
     "writing",
     "management",
-    "addon"
+    "addon",
+    "maintained-fork",
+    "windows-memory",
+    "process-memory"
   ],
-  "author": "Rob--",
+  "author": "JoShMiQueL",
+  "contributors": [
+    {
+      "name": "Rob--",
+      "url": "https://github.com/Rob--"
+    }
+  ],
   "license": "MIT",
   "gypfile": true,
   "bugs": {
-    "url": "https://github.com/Rob--/memoryjs/issues"
+    "url": "https://github.com/JoShMiQueL/memoryjs/issues"
   },
-  "homepage": "https://github.com/Rob--/memoryjs#readme",
+  "homepage": "https://github.com/JoShMiQueL/memoryjs#readme",
   "dependencies": {
     "eslint": "^8.5.0",
     "eslint-config-airbnb-base": "^12.1.0",
