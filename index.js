@@ -20,7 +20,7 @@ function openProcess(processIdentifier, callback) {
 }
 
 function closeProcess(handle) {
-  return memoryjs.closeHandle(handle);
+  return memoryjs.closeProcess(handle);
 }
 
 function getProcesses(callback) {
