@@ -15,11 +15,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check for version change
-        id: check
-        uses: EndBug/version-check@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Version Check
+        uses: EndBug/version-check@v2.1.4
 
       - name: Setup Node.js for version check
         uses: actions/setup-node@v4
