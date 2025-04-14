@@ -20,8 +20,9 @@ jobs:
         with:
           node-version: 20.x
 
-      - name: Install semver
-        run: npm install -g semver
+      - name: Install version check dependencies
+        working-directory: .github/workflows
+        run: npm install
 
       - name: Check for version change
         id: check
@@ -34,13 +35,7 @@ jobs:
         if: steps.check.outputs.changed == 'true'
         run: |
           CURRENT_VERSION=$(node -p "require('./package.json').version")
-          LATEST_NPM_VERSION=$(npm view @joshmiquel/memoryjs version 2>/dev/null || echo "0.0.0")
-          if [ "$(semver $CURRENT_VERSION)" != "$(semver -i $LATEST_NPM_VERSION patch)" ] && \
-             [ "$(semver $CURRENT_VERSION)" != "$(semver -i $LATEST_NPM_VERSION minor)" ] && \
-             [ "$(semver $CURRENT_VERSION)" != "$(semver -i $LATEST_NPM_VERSION major)" ]; then
-            echo "Error: Invalid version increment. Version must be exactly one increment (patch, minor, or major) from $LATEST_NPM_VERSION"
-            exit 1
-          fi
+          node .github/workflows/version-check.js "v${CURRENT_VERSION}" "patch"
 
       - name: Setup Bun
         if: steps.check.outputs.changed == 'true'

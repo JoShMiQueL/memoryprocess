@@ -1,0 +1,8 @@
+{
+  "name": "workflow-scripts",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "semver": "^7.5.4"
+  }
+}
