@@ -1,5 +1,3 @@
-import type { BufferEncoding, MemoryJS, StructronContext } from './types';
-
 const SIZEOF_STDSTRING_32BIT = 24;
 const SIZEOF_STDSTRING_64BIT = 32;
 const STDSTRING_LENGTH_OFFSET = 0x10;
@@ -18,8 +16,8 @@ const STDSTRING_LENGTH_OFFSET = 0x10;
  * @param platform the architecture of the process, either "32" or "64"
  * @param encoding the encoding type of the string
  */
-const STRUCTRON_TYPE_STRING = (memoryjs: MemoryJS) => (handle: number, structAddress: number, platform: '32' | '64', encoding: BufferEncoding = 'utf8') => ({
-  read(buffer: Buffer, offset: number): string {
+const STRUCTRON_TYPE_STRING = memoryjs => (handle, structAddress, platform, encoding = 'utf8') => ({
+  read(buffer, offset) {
     // get string length from `std::string` container
     const length = buffer.readUInt32LE(offset + STDSTRING_LENGTH_OFFSET);
 
@@ -32,7 +30,7 @@ const STRUCTRON_TYPE_STRING = (memoryjs: MemoryJS) => (handle: number, structAdd
     // if length <= 15, `std::string` directly contains the string
     return buffer.toString(encoding, offset, offset + length);
   },
-  write(value: string, context: StructronContext, offset: number): void {
+  write(value, context, offset) {
     // address containing the length of the string
     const lengthAddress = structAddress + offset + STDSTRING_LENGTH_OFFSET;
 
@@ -74,4 +72,4 @@ const STRUCTRON_TYPE_STRING = (memoryjs: MemoryJS) => (handle: number, structAdd
   SIZE: platform === '64' ? SIZEOF_STDSTRING_64BIT : SIZEOF_STDSTRING_32BIT,
 });
 
-export { STRUCTRON_TYPE_STRING };
+module.exports = { STRUCTRON_TYPE_STRING };

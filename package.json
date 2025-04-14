@@ -2,13 +2,18 @@
   "name": "@joshmiquel/memoryjs",
   "version": "3.5.7",
   "description": "Maintained fork of memoryjs with critical fixes. Includes /Zc:strictStrings compiler fixes and other improvements. Original package by Rob--",
-  "type": "module",
-  "main": "lib/index.js",
-  "types": "lib/index.d.ts",
+  "main": "index.js",
+  "types": "index.d.ts",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "bun run build.ts",
-    "buildtest": "cd test && MSBuild.exe project.sln //p:Configuration=Release"
+    "install": "npm run build",
+    "build": "node ./scripts/install.js",
+    "build32": "node-gyp clean configure build --arch=ia32",
+    "build64": "node-gyp clean configure build --arch=x64",
+    "buildtest": "cd test && MSBuild.exe project.sln //p:Configuration=Release",
+    "debug": "node ./scripts/debug.js",
+    "debug32": "node-gyp configure rebuild --debug --arch=xia32",
+    "debug64": "node-gyp configure rebuild --debug --arch=x64"
   },
   "repository": {
     "type": "git",
@@ -41,12 +46,5 @@
     "eslint": "^8.5.0",
     "eslint-config-airbnb-base": "^12.1.0",
     "node-addon-api": "^3.2.1"
-  },
-  "devDependencies": {
-    "@microsoft/api-extractor": "^7.52.3",
-    "@types/bun": "^1.2.9"
-  },
-  "peerDependencies": {
-    "typescript": "^5"
   }
 }
