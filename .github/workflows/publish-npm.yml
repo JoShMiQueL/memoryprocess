@@ -1,12 +1,13 @@
 name: Publish to npm
 
 on:
+  workflow_dispatch:
   release:
     types:
       - published
   push:
     branches:
-      - master
+      - dev
     tags:
       - 'v*'
 
