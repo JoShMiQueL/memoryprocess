@@ -11,3 +11,6 @@ binding.gyp
 build.ts
 bun.lock
 tsconfig.json
+config
+bunfig.toml
+index.ts
