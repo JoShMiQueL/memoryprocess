@@ -46,9 +46,6 @@ jobs:
           node-version: 20.x
           registry-url: https://registry.npmjs.org/
 
-      - name: Bump version
-        run: npm version patch --from-git
-
       - name: Publish to npm
         run: npm publish --provenance --access public
         env:
