@@ -1,4 +1,17 @@
-import type { BufferEncoding, MemoryJS, StructronContext } from './types';
+import { DataType, DataTypeBE, MemoryJS } from './types';
+
+export interface StructronContext {
+  buffer: Buffer;
+}
+
+export interface StructronType {
+  read(buffer: Buffer, offset: number): string;
+  write(value: string, context: StructronContext, offset: number): void;
+  SIZE: number;
+}
+
+export type Platform = '32' | '64';
+export type BufferEncoding = 'utf8' | 'utf16le' | 'ascii';
 
 const SIZEOF_STDSTRING_32BIT = 24;
 const SIZEOF_STDSTRING_64BIT = 32;
@@ -18,15 +31,15 @@ const STDSTRING_LENGTH_OFFSET = 0x10;
  * @param platform the architecture of the process, either "32" or "64"
  * @param encoding the encoding type of the string
  */
-const STRUCTRON_TYPE_STRING = (memoryjs: MemoryJS) => (handle: number, structAddress: number, platform: '32' | '64', encoding: BufferEncoding = 'utf8') => ({
+export const STRUCTRON_TYPE_STRING = (memoryjs: MemoryJS) => (handle: number, structAddress: bigint, platform: Platform, encoding: BufferEncoding = 'utf8'): StructronType => ({
   read(buffer: Buffer, offset: number): string {
     // get string length from `std::string` container
     const length = buffer.readUInt32LE(offset + STDSTRING_LENGTH_OFFSET);
 
     // if length > 15, `std::string` has a pointer to the string
     if (length > 15) {
-      const pointer = platform === '64' ? buffer.readBigInt64LE(offset) : buffer.readUInt32LE(offset);
-      return memoryjs.readMemory(handle, Number(pointer), memoryjs.STRING);
+      const pointer = platform === '64' ? buffer.readBigInt64LE(offset) : BigInt(buffer.readUInt32LE(offset));
+      return memoryjs.readMemory(handle, pointer, 'string');
     }
 
     // if length <= 15, `std::string` directly contains the string
@@ -34,14 +47,14 @@ const STRUCTRON_TYPE_STRING = (memoryjs: MemoryJS) => (handle: number, structAdd
   },
   write(value: string, context: StructronContext, offset: number): void {
     // address containing the length of the string
-    const lengthAddress = structAddress + offset + STDSTRING_LENGTH_OFFSET;
+    const lengthAddress = structAddress + BigInt(offset + STDSTRING_LENGTH_OFFSET);
 
     // get existing `std::string` buffer
     const bufferSize = platform === '64' ? SIZEOF_STDSTRING_64BIT : SIZEOF_STDSTRING_32BIT;
-    const existingBuffer = memoryjs.readBuffer(handle, structAddress + offset, bufferSize);
+    const existingBuffer = memoryjs.readBuffer(handle, structAddress + BigInt(offset), bufferSize);
 
     // fetch length of string in memory (to determine if it's pointer based)
-    const length = memoryjs.readMemory(handle, lengthAddress, memoryjs.INT);
+    const length = memoryjs.readMemory(handle, lengthAddress, 'int32');
 
     if ((length > 15 && value.length <= 15) || (length <= 15 && value.length > 15)) {
       // there are two ways strings are stored: directly or with a pointer,
@@ -56,13 +69,13 @@ const STRUCTRON_TYPE_STRING = (memoryjs: MemoryJS) => (handle: number, structAdd
     }
 
     // write new length
-    memoryjs.writeMemory(handle, lengthAddress, value.length, memoryjs.UINT32);
+    memoryjs.writeMemory(handle, lengthAddress, value.length, 'uint32');
     existingBuffer.writeUInt32LE(value.length, STDSTRING_LENGTH_OFFSET);
 
     if (length > 15 && value.length > 15) {
       // write new string in memory
-      const pointer = memoryjs.readMemory(handle, structAddress + offset, memoryjs.POINTER);
-      memoryjs.writeMemory(handle, pointer, value, memoryjs.STRING);
+      const pointer = memoryjs.readMemory(handle, structAddress + BigInt(offset), 'pointer');
+      memoryjs.writeMemory(handle, typeof pointer === 'number' ? BigInt(pointer) : pointer, value, 'string');
     } else if (length <= 15 && value.length <= 15) {
       // write new string directly into buffer
       existingBuffer.write(value, encoding);
@@ -74,4 +87,11 @@ const STRUCTRON_TYPE_STRING = (memoryjs: MemoryJS) => (handle: number, structAdd
   SIZE: platform === '64' ? SIZEOF_STDSTRING_64BIT : SIZEOF_STDSTRING_32BIT,
 });
 
-export { STRUCTRON_TYPE_STRING };
+/**
+ * Type guard to check if a DataType is a big-endian data type
+ * @param dataType The data type to check
+ * @returns True if the data type is big-endian
+ */
+export function isDataTypeBE(dataType: DataType): dataType is DataTypeBE {
+  return dataType.toLowerCase().endsWith('_be');
+}
