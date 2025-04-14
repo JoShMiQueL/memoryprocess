@@ -1,32 +1,17 @@
-import fs from 'fs';
-const memoryjs = require('./build/Release/memoryjs.node');
-import Debugger from './src/debugger';
-import constants from './src/consts';
-import { STRUCTRON_TYPE_STRING } from './src/utils';
-import type {
-  HANDLE,
-  StructronContext,
-  BufferEncoding,
-  MemoryJS,
-  DWORD64,
-  ProcessInfo,
-  ModuleEntry,
-  DataType,
-  Callback,
-  MemoryBasicInformation,
-  Protection,
-  AllocationType
-} from './src/types';
+const fs = require('fs');
+const memoryjs = require('./build/Release/memoryjs');
+const Debugger = require('./src/debugger');
+const constants = require('./src/consts');
+const { STRUCTRON_TYPE_STRING } = require('./src/utils');
 
 /* TODO:
  * - remove callbacks from all functions and implement promise support using Napi
  * - validate argument types in JS space instead of C++
  * - refactor read/write memory functions to use buffers instead?
  * - remove `closeProcess` in favour of `closeHandle`
- * - REFACTOR IMPORTS ON ALL SRC FILES AND ORGANIZE, EXPORT ALL FROM INDEX.TS
  */
 
-export function openProcess(processIdentifier: string | number, callback?: Callback<ProcessInfo>): ProcessInfo {
+function openProcess(processIdentifier, callback) {
   if (arguments.length === 1) {
     return memoryjs.openProcess(processIdentifier);
   }
@@ -34,11 +19,11 @@ export function openProcess(processIdentifier: string | number, callback?: Callb
   return memoryjs.openProcess(processIdentifier, callback);
 }
 
-export function closeProcess(handle: HANDLE): boolean {
+function closeProcess(handle) {
   return memoryjs.closeProcess(handle);
 }
 
-export function getProcesses(callback?: Callback<ProcessInfo[]>): ProcessInfo[] {
+function getProcesses(callback) {
   if (arguments.length === 0) {
     return memoryjs.getProcesses();
   }
@@ -46,7 +31,7 @@ export function getProcesses(callback?: Callback<ProcessInfo[]>): ProcessInfo[] 
   return memoryjs.getProcesses(callback);
 }
 
-export function findModule(moduleName: string, processId: number, callback?: Callback<ModuleEntry>): ModuleEntry {
+function findModule(moduleName, processId, callback) {
   if (arguments.length === 2) {
     return memoryjs.findModule(moduleName, processId);
   }
@@ -54,7 +39,7 @@ export function findModule(moduleName: string, processId: number, callback?: Cal
   return memoryjs.findModule(moduleName, processId, callback);
 }
 
-export function getModules(processId: number, callback?: Callback<ModuleEntry[]>): ModuleEntry[] {
+function getModules(processId, callback) {
   if (arguments.length === 1) {
     return memoryjs.getModules(processId);
   }
@@ -62,7 +47,7 @@ export function getModules(processId: number, callback?: Callback<ModuleEntry[]>
   return memoryjs.getModules(processId, callback);
 }
 
-export function readMemory<T>(handle: HANDLE, address: DWORD64, dataType: DataType, callback?: Callback<T>): T {
+function readMemory(handle, address, dataType, callback) {
   if (dataType.toLowerCase().endsWith('_be')) {
     return readMemoryBE(handle, address, dataType, callback);
   }
@@ -74,7 +59,7 @@ export function readMemory<T>(handle: HANDLE, address: DWORD64, dataType: DataTy
   return memoryjs.readMemory(handle, address, dataType.toLowerCase(), callback);
 }
 
-export function readMemoryBE(handle: HANDLE, address: DWORD64, dataType: DataType, callback?: Callback<any>): any {
+function readMemoryBE(handle, address, dataType, callback) {
   let value = null;
 
   switch (dataType) {
@@ -125,10 +110,10 @@ export function readMemoryBE(handle: HANDLE, address: DWORD64, dataType: DataTyp
     return value;
   }
 
-  callback(value === null ? new Error('Invalid data type argument!') : null, value);
+  callback(value === null ? 'Invalid data type argument!' : '', value);
 }
 
-export function readBuffer(handle: HANDLE, address: DWORD64, size: number, callback?: Callback<Buffer>): Buffer {
+function readBuffer(handle, address, size, callback) {
   if (arguments.length === 3) {
     return memoryjs.readBuffer(handle, address, size);
   }
@@ -136,10 +121,10 @@ export function readBuffer(handle: HANDLE, address: DWORD64, size: number, callb
   return memoryjs.readBuffer(handle, address, size, callback);
 }
 
-export function writeMemory<T>(handle: HANDLE, address: DWORD64, value: T, dataType: DataType): boolean {
-  let dataValue: T | string = value;
-  if ((dataType === constants.STR || dataType === constants.STRING) && typeof value === 'string') {
-    dataValue = value + '\0'; // add terminator
+function writeMemory(handle, address, value, dataType) {
+  let dataValue = value;
+  if (dataType === constants.STR || dataType === constants.STRING) {
+    dataValue += '\0'; // add terminator
   }
 
   const bigintTypes = [constants.INT64, constants.INT64_BE, constants.UINT64, constants.UINT64_BE];
@@ -154,8 +139,8 @@ export function writeMemory<T>(handle: HANDLE, address: DWORD64, value: T, dataT
   return memoryjs.writeMemory(handle, address, dataValue, dataType.toLowerCase());
 }
 
-export function writeMemoryBE(handle: HANDLE, address: DWORD64, value: any, dataType: DataType): boolean {
-  let buffer: Buffer | null = null;
+function writeMemoryBE(handle, address, value, dataType) {
+  let buffer = null;
 
   switch (dataType) {
     case constants.INT64_BE:
@@ -215,14 +200,14 @@ export function writeMemoryBE(handle: HANDLE, address: DWORD64, value: any, data
     throw new Error('Invalid data type argument!');
   }
 
-  return writeBuffer(handle, address, buffer);
+  writeBuffer(handle, address, buffer);
 }
 
-export function writeBuffer(handle: HANDLE, address: DWORD64, buffer: Buffer): boolean {
+function writeBuffer(handle, address, buffer) {
   return memoryjs.writeBuffer(handle, address, buffer);
 }
 
-export function findPattern() {
+function findPattern() {
   const findPattern           = ['number', 'string', 'number', 'number'].toString();
   const findPatternByModule   = ['number', 'string', 'string', 'number', 'number'].toString();
   const findPatternByAddress  = ['number', 'number', 'string', 'number', 'number'].toString();
@@ -250,7 +235,7 @@ export function findPattern() {
   throw new Error('invalid arguments!');
 }
 
-export function callFunction<T>(handle: HANDLE, args: any[], returnType: DataType, address: DWORD64, callback?: Callback<T>): T {
+function callFunction(handle, args, returnType, address, callback) {
   if (arguments.length === 4) {
     return memoryjs.callFunction(handle, args, returnType, address);
   }
@@ -258,7 +243,7 @@ export function callFunction<T>(handle: HANDLE, args: any[], returnType: DataTyp
   return memoryjs.callFunction(handle, args, returnType, address, callback);
 }
 
-export function virtualAllocEx(handle: HANDLE, address: DWORD64, size: number, allocationType: AllocationType, protection: Protection, callback?: Callback<DWORD64>): DWORD64 {
+function virtualAllocEx(handle, address, size, allocationType, protection, callback) {
   if (arguments.length === 5) {
     return memoryjs.virtualAllocEx(handle, address, size, allocationType, protection);
   }
@@ -266,7 +251,7 @@ export function virtualAllocEx(handle: HANDLE, address: DWORD64, size: number, a
   return memoryjs.virtualAllocEx(handle, address, size, allocationType, protection, callback);
 }
 
-export function virtualProtectEx(handle: HANDLE, address: DWORD64, size: number, protection: Protection, callback?: Callback<Protection>): Protection {
+function virtualProtectEx(handle, address, size, protection, callback) {
   if (arguments.length === 4) {
     return memoryjs.virtualProtectEx(handle, address, size, protection);
   }
@@ -274,7 +259,7 @@ export function virtualProtectEx(handle: HANDLE, address: DWORD64, size: number,
   return memoryjs.virtualProtectEx(handle, address, size, protection, callback);
 }
 
-export function getRegions(handle: HANDLE, getOffsets: boolean, callback?: Callback<MemoryBasicInformation[]>): MemoryBasicInformation[] {
+function getRegions(handle, getOffsets, callback) {
   if (arguments.length === 1) {
     return memoryjs.getRegions(handle);
   }
@@ -282,7 +267,7 @@ export function getRegions(handle: HANDLE, getOffsets: boolean, callback?: Callb
   return memoryjs.getRegions(handle, callback);
 }
 
-export function virtualQueryEx(handle: HANDLE, address: DWORD64, callback?: Callback<MemoryBasicInformation>): MemoryBasicInformation {
+function virtualQueryEx(handle, address, callback) {
   if (arguments.length === 2) {
     return memoryjs.virtualQueryEx(handle, address);
   }
@@ -290,7 +275,7 @@ export function virtualQueryEx(handle: HANDLE, address: DWORD64, callback?: Call
   return memoryjs.virtualQueryEx(handle, address, callback);
 }
 
-export function injectDll(handle: HANDLE, dllPath: string, callback?: Callback<DWORD64>): DWORD64 {
+function injectDll(handle, dllPath, callback) {
   if (!dllPath.endsWith('.dll')) {
     throw new Error("Given path is invalid: file is not of type 'dll'.");
   }
@@ -306,7 +291,7 @@ export function injectDll(handle: HANDLE, dllPath: string, callback?: Callback<D
   return memoryjs.injectDll(handle, dllPath, callback);
 }
 
-export function unloadDll(handle: HANDLE, module: ModuleEntry, callback?: Callback<boolean>): boolean {
+function unloadDll(handle, module, callback) {
   if (arguments.length === 2) {
     return memoryjs.unloadDll(handle, module);
   }
@@ -314,7 +299,7 @@ export function unloadDll(handle: HANDLE, module: ModuleEntry, callback?: Callba
   return memoryjs.unloadDll(handle, module, callback);
 }
 
-export function openFileMapping(fileName: string): HANDLE {
+function openFileMapping(fileName) {
   if (arguments.length !== 1 || typeof fileName !== 'string') {
     throw new Error('invalid arguments!');
   }
@@ -322,7 +307,7 @@ export function openFileMapping(fileName: string): HANDLE {
   return memoryjs.openFileMapping(fileName);
 }
 
-export function mapViewOfFile(processHandle: HANDLE, fileHandle: HANDLE, offset: DWORD64, viewSize: number, pageProtection: Protection): DWORD64 {
+function mapViewOfFile(processHandle, fileHandle, offset, viewSize, pageProtection) {
   const validArgs = [
     ['number', 'number'],
     ['number', 'number', 'number', 'number', 'number'],
@@ -370,12 +355,8 @@ const library = {
   Debugger: new Debugger(memoryjs),
 };
 
-export { HANDLE, DWORD64, Callback, Protection, AllocationType, ProcessInfo, ModuleEntry, DataType, Debugger, MemoryBasicInformation };
-
-export { BufferEncoding, StructronContext };
-
-export default {
+module.exports = {
   ...constants,
   ...library,
-  STRUCTRON_TYPE_STRING: STRUCTRON_TYPE_STRING(library as unknown as MemoryJS),
+  STRUCTRON_TYPE_STRING: STRUCTRON_TYPE_STRING(library),
 };
