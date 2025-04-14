@@ -37,13 +37,13 @@ jobs:
             echo "Using local version: $LOCAL_VERSION"
           else
             echo "version=$NPM_VERSION" >> $GITHUB_OUTPUT
-            echo "Using npm version: $NPM_VERSION"
+            echo "Using latest version from NPM: $NPM_VERSION"
           fi
 
       - name: Calculate new version
         id: calculate-version
         run: |
-          NEW_VERSION=$(echo "${{ steps.get-npm-version.outputs.npm_version }}")
+          NEW_VERSION=$(echo "${{ steps.get-npm-version.outputs.version }}")
           IFS='.' read -r major minor patch <<< "$NEW_VERSION"
 
           case "${{ github.event.inputs.bump_type }}" in
