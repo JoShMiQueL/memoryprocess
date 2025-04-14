@@ -1,15 +1,22 @@
 <p align="center">
   <img width="600" src="assets/logo.png">
   <br>
-  <code>memoryjs</code> is an NPM package to read and write process memory, now with Bun.js support!
+  <code>@joshmiquel/memoryjs</code> is an NPM package to read and write process memory, now with Bun.js support!
   <br><br>
   This is a fork of the original <a href="https://github.com/Rob--/memoryjs">memoryjs</a> package, maintained by <a href="https://github.com/JoShMiQueL">JoShMiQueL</a> with added Bun.js support.
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/github/license/Rob--/memoryjs" alt="GitHub License">
-  <img src="https://img.shields.io/npm/v/memoryjs.svg?style=flat" alt="NPM Version">
-  <img src="https://img.shields.io/npm/dy/memoryjs" alt="NPM Downloads">
+  <img alt="GitHub License" src="https://img.shields.io/github/license/JoShMiQueL/memoryjs">
+  <a href="https://github.com/JoShMiQueL/memoryjs/actions/workflows/publish-npm.yml" target="_blank">
+    <img alt="GitHub Actions Workflow Status" src="https://img.shields.io/github/actions/workflow/status/JoShMiQueL/memoryjs/publish-npm.yml?branch=master&style=flat&logo=npm&label=Publish%20to%20npm">
+  </a>
+  <a href="https://www.npmjs.com/package/@joshmiquel/memoryjs" target="_blank">
+    <img alt="NPM Downloads" src="https://img.shields.io/npm/dy/%40joshmiquel%2Fmemoryjs">
+  </a>
+  <a href="https://www.npmjs.com/package/@joshmiquel/memoryjs" target="_blank">
+    <img alt="NPM Version" src="https://img.shields.io/npm/v/%40joshmiquel%2Fmemoryjs">
+  </a>
 </p>
 
 ---
