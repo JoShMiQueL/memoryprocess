@@ -1,35 +1,6 @@
-import { EventEmitter } from 'node:events';
-
-interface DebugEvent {
-  processId: number;
-  threadId: number;
-}
-
-interface ProcessHandle {
-  handle: number;
-}
-
-interface MemoryJS {
-  attachDebugger(processId: number, killOnDetach: boolean): boolean;
-  detachDebugger(processId: number): boolean;
-  removeHardwareBreakpoint(processId: number, register: number): boolean;
-  setHardwareBreakpoint(processId: number, address: number, register: number, trigger: string, size: number): boolean;
-  readMemory(handle: number, address: number, dataType: string): any;
-  openProcess(processId: number): ProcessHandle;
-  closeProcess(handle: number): void;
-  awaitDebugEvent(register: number, timeout: number): DebugEvent | null;
-  handleDebugEvent(processId: number, threadId: number): void;
-  STRING: string;
-}
-
-interface Interval {
-  register: number;
-  id: NodeJS.Timeout;
-}
+const EventEmitter = require('events');
 
 const lengths = {
-  str: 0,
-  string: 0,
   byte: 1,
   int: 4,
   int32: 4,
@@ -54,17 +25,7 @@ const lengths = {
 };
 
 // Tracks used and unused registers
-interface RegisterMap {
-  DR0: number;
-  DR1: number;
-  DR2: number;
-  DR3: number;
-}
-
 class Registers {
-  private registers: RegisterMap;
-  private used: number[];
-
   constructor() {
     this.registers = Object.freeze({
       DR0: 0x0,
@@ -84,21 +45,17 @@ class Registers {
     return unused[0];
   }
 
-  busy(register: number) {
+  busy(register) {
     this.used.push(register);
   }
 
-  unbusy(register: number) {
+  unbusy(register) {
     this.used.splice(this.used.indexOf(register), 1);
   }
 }
 
 class Debugger extends EventEmitter {
-  private memoryjs: MemoryJS;
-  private registers: Registers;
-  private attached: boolean;
-  private intervals: Interval[];
-  constructor(memoryjs: MemoryJS) {
+  constructor(memoryjs) {
     super();
     this.memoryjs = memoryjs;
     this.registers = new Registers();
@@ -106,7 +63,7 @@ class Debugger extends EventEmitter {
     this.intervals = [];
   }
 
-  attach(processId: number, killOnDetach: boolean = false): boolean {
+  attach(processId, killOnDetach = false) {
     const success = this.memoryjs.attachDebugger(processId, killOnDetach);
 
     if (success) {
@@ -116,12 +73,12 @@ class Debugger extends EventEmitter {
     return success;
   }
 
-  detach(processId: number): boolean {
+  detach(processId) {
     this.intervals.map(({ id }) => clearInterval(id));
     return this.memoryjs.detachDebugger(processId);
   }
 
-  removeHardwareBreakpoint(processId: number, register: number): boolean {
+  removeHardwareBreakpoint(processId, register) {
     const success = this.memoryjs.removeHardwareBreakpoint(processId, register);
 
     if (success) {
@@ -138,7 +95,7 @@ class Debugger extends EventEmitter {
     return success;
   }
 
-  setHardwareBreakpoint(processId: number, address: number, trigger: string, dataType: keyof typeof lengths): number {
+  setHardwareBreakpoint(processId, address, trigger, dataType) {
     let size = lengths[dataType];
 
     // If we are breakpointing a string, we need to determine the length of it
@@ -165,7 +122,7 @@ class Debugger extends EventEmitter {
     return register;
   }
 
-  monitor(register: number, timeout: number = 100): void {
+  monitor(register, timeout = 100) {
     const id = setInterval(() => {
       const debugEvent = this.memoryjs.awaitDebugEvent(register, timeout);
 
@@ -179,7 +136,7 @@ class Debugger extends EventEmitter {
         });
 
         // Event per register
-        this.emit(String(register), debugEvent);
+        this.emit(register, debugEvent);
       }
     }, 100);
 
@@ -190,6 +147,4 @@ class Debugger extends EventEmitter {
   }
 }
 
-export { lengths }
-
-export default Debugger;
+module.exports = Debugger;
