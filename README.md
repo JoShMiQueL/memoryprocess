@@ -9,7 +9,7 @@
 <p align="center">
   <img alt="GitHub License" src="https://img.shields.io/github/license/JoShMiQueL/memoryjs">
   <a href="https://github.com/JoShMiQueL/memoryjs/actions/workflows/publish-npm.yml" target="_blank">
-    <img alt="GitHub Actions Workflow Status" src="https://img.shields.io/github/actions/workflow/status/JoShMiQueL/memoryjs/publish-npm.yml?branch=master&style=flat&logo=npm&label=Publish%20to%20npm">
+    <img alt="GitHub Actions Workflow Status" src="https://img.shields.io/github/actions/workflow/status/JoShMiQueL/memoryjs/build-and-publish.yml?branch=master&style=flat&logo=npm&label=Publish%20to%20npm">
   </a>
   <a href="https://www.npmjs.com/package/@joshmiquel/memoryjs" target="_blank">
     <img alt="NPM Downloads" src="https://img.shields.io/npm/dy/%40joshmiquel%2Fmemoryjs">
