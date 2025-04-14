@@ -1,8 +1,8 @@
 .github
-native
+native/
 node_modules
-src
-test
+src/
+test/
 .eslintrc.js
 .gitattributes
 .gitignore
@@ -11,6 +11,6 @@ binding.gyp
 build.ts
 bun.lock
 tsconfig.json
-config
+config/
 bunfig.toml
 index.ts
