@@ -58,7 +58,6 @@ async function build(options: BuildOptions = {}) {
     await Bun.build({
       entrypoints: [
         'index.ts',
-        'src/consts.ts',
         'src/debugger.ts',
         'src/types.ts',
         'src/utils.ts'
