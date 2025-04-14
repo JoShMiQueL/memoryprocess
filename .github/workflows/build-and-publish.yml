@@ -73,6 +73,7 @@ jobs:
             echo "version_changed=false" >> $GITHUB_OUTPUT
             exit 1
           fi
+
   build:
     needs: check-version
     if: needs.check-version.outputs.version_changed == 'true'
@@ -99,6 +100,13 @@ jobs:
 
       - name: Build project
         run: bun run build
+      
+      - name: Upload compiled files
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-files
+          path: lib/
+
   publish-npm:
     needs: [check-version, build]
     if: needs.check-version.outputs.version_changed == 'true'
@@ -107,13 +115,25 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Setup Node.js for publish
         uses: actions/setup-node@v4
         with:
           node-version: 20.x
           registry-url: https://registry.npmjs.org/
-      - run: npm install --ignore-scripts
-      - run: npm publish --access public
+
+      - name: Install dependencies
+        run: npm install --ignore-scripts
+
+      - name: Download compiled files
+        uses: actions/download-artifact@v4
+        with:
+          name: compiled-files
+          path: lib/
+        
+      - name: Publish to npm
+        run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
