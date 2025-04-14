@@ -104,11 +104,9 @@ jobs:
             gh release create v${{ steps.calculate-version.outputs.new_version }} \
               --title "Beta Release v${{ steps.calculate-version.outputs.new_version }}" \
               --notes "Beta release for @joshmiquel/memoryjs v${{ steps.calculate-version.outputs.new_version }}" \
-              --prerelease \
-              --draft=false
+              --prerelease
           else
             gh release create v${{ steps.calculate-version.outputs.new_version }} \
               --title "Release v${{ steps.calculate-version.outputs.new_version }}" \
-              --notes "Automated release for @joshmiquel/memoryjs v${{ steps.calculate-version.outputs.new_version }}" \
-              --draft=false
+              --notes "Automated release for @joshmiquel/memoryjs v${{ steps.calculate-version.outputs.new_version }}"
           fi
