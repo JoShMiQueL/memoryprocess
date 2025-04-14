@@ -119,7 +119,7 @@ const hardwareDebug = {
   },
 };
 
-module.exports = {
+export default {
   // data type constants
   ...dataTypes.standard,
   ...dataTypes.function,
