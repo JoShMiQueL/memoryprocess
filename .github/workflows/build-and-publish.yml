@@ -21,22 +21,22 @@ jobs:
           node-version: '20'
 
       - name: Get package.json version
-        id: get-version
+        id: get-local-version
         run: |
-          VERSION=$(jq -r .version package.json)
-          echo "local_version=$VERSION" >> $GITHUB_ENV
+          LOCAL_VERSION=$(jq -r .version package.json)
+          echo "local_version=$LOCAL_VERSION" >> $GITHUB_OUTPUT
 
       - name: Get latest npm version for @joshmiquel/memoryjs
         id: get-npm-version
         run: |
           NPM_VERSION=$(npm view @joshmiquel/memoryjs version || echo "0.0.0")
-          echo "npm_version=$NPM_VERSION" >> $GITHUB_ENV
+          echo "npm_version=$NPM_VERSION" >> $GITHUB_OUTPUT
 
       - name: Validate version increment
         id: check-version
         run: |
-          LOCAL_VERSION="${{ env.local_version }}"
-          NPM_VERSION="${{ env.npm_version }}"
+          LOCAL_VERSION="${{ steps.get-local-version.outputs.local_version }}"
+          NPM_VERSION="${{ steps.get-npm-version.outputs.npm_version }}"
 
           # Split versions into major, minor, patch
           IFS='.' read -r local_major local_minor local_patch <<< "$LOCAL_VERSION"
@@ -113,7 +113,7 @@ jobs:
         with:
           node-version: 20.x
           registry-url: https://registry.npmjs.org/
-      - run: npm install
+      - run: npm install --ignore-scripts
       - run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
