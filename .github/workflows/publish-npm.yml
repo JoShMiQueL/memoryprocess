@@ -37,9 +37,6 @@ jobs:
       - name: Install node-gyp
         run: bun add -g node-gyp
 
-      - name: Setup Windows Build Tools
-        run: bun add -g --production windows-build-tools
-
       - name: Build
         run: bun run build
 
