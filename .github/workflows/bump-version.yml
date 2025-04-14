@@ -1,0 +1,93 @@
+name: Bump Version
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump_type:
+        description: 'Version bump type'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+jobs:
+  bump-version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Get latest npm version for @joshmiquel/memoryjs
+        id: get-npm-version
+        run: |
+          NPM_VERSION=$(npm view @joshmiquel/memoryjs version || echo "0.0.0")
+          if [ "$NPM_VERSION" = "0.0.0" ]; then
+            # Package doesn't exist on npm, use local version
+            LOCAL_VERSION=$(node -p "require('./package.json').version")
+            echo "version=$LOCAL_VERSION" >> $GITHUB_OUTPUT
+            echo "Using local version: $LOCAL_VERSION"
+          else
+            echo "version=$NPM_VERSION" >> $GITHUB_OUTPUT
+            echo "Using npm version: $NPM_VERSION"
+          fi
+
+      - name: Calculate new version
+        id: calculate-version
+        run: |
+          NEW_VERSION=$(echo "${{ steps.get-npm-version.outputs.npm_version }}")
+          IFS='.' read -r major minor patch <<< "$NEW_VERSION"
+
+          case "${{ github.event.inputs.bump_type }}" in
+            "patch")
+              NEW_VERSION="$major.$minor.$((patch + 1))"
+              ;;
+            "minor")
+              NEW_VERSION="$major.$((minor + 1)).0"
+              ;;
+            "major")
+              NEW_VERSION="$((major + 1)).0.0"
+              ;;
+            *)
+              echo "Invalid bump type"
+              exit 1
+              ;;
+          esac
+
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "Calculated new version: $NEW_VERSION"
+      
+      - name: Update package.json version
+        run: |
+          npm version "${{ steps.calculate-version.outputs.new_version }}" --no-git-tag-version
+          echo "Updated package.json to version ${{ steps.calculate-version.outputs.new_version }}"
+
+      - name: Create tag
+        run: |
+          git tag v${{ steps.calculate-version.outputs.new_version }}
+
+      - name: Commit and push changes
+        run: |
+          git config --global user.name 'GitHub Action'
+          git config --global user.email 'action@github.com'
+          git add package.json
+          git commit -m "Bump version to ${{ steps.calculate-version.outputs.new_version }} [skip ci]"
+          git push origin main
+          git push origin v${{ steps.calculate-version.outputs.new_version }}
+  
+      - name: Create GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create v${{ steps.calculate-version.outputs.new_version }} \
+            --title "Release v${{ steps.calculate-version.outputs.new_version }}" \
+            --notes "Automated release for @joshmiquel/memoryjs v${{ steps.calculate-version.outputs.new_version }}" \
+            --draft=false
