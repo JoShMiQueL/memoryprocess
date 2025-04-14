@@ -1,9 +1,8 @@
 import fs from 'fs';
 const memoryjs = require('./build/Release/memoryjs.node');
 import Debugger from './src/debugger';
-import constants from './src/consts';
 import { STRUCTRON_TYPE_STRING } from './src/utils';
-import type {
+import {
   HANDLE,
   StructronContext,
   BufferEncoding,
@@ -15,7 +14,16 @@ import type {
   Callback,
   MemoryBasicInformation,
   Protection,
-  AllocationType
+  AllocationType,
+  FunctionType,
+  SignatureType,
+  PageType,
+  DebugRegister,
+  BreakpointTriggerType,
+  BOOL,
+  DWORD,
+  SIZE_T,
+  ProcessEntry
 } from './src/types';
 
 /* TODO:
@@ -78,41 +86,41 @@ export function readMemoryBE(handle: HANDLE, address: DWORD64, dataType: DataTyp
   let value = null;
 
   switch (dataType) {
-    case constants.INT64_BE:
+    case 'int64_be':
       value = readBuffer(handle, address, 8).readBigInt64BE();
       break;
 
-    case constants.UINT64_BE:
+    case 'uint64_be':
       value = readBuffer(handle, address, 8).readBigUInt64BE();
       break;
 
-    case constants.INT32_BE:
-    case constants.INT_BE:
-    case constants.LONG_BE:
+    case 'int32_be':
+    case 'int_be':
+    case 'long_be':
       value = readBuffer(handle, address, 4).readInt32BE();
       break;
 
-    case constants.UINT32_BE:
-    case constants.UINT_BE:
-    case constants.ULONG_BE:
+    case 'uint32_be':
+    case 'uint_be':
+    case 'ulong_be':
       value = readBuffer(handle, address, 4).readUInt32BE();
       break;
 
-    case constants.INT16_BE:
-    case constants.SHORT_BE:
+    case 'int16_be':
+    case 'short_be':
       value = readBuffer(handle, address, 2).readInt16BE();
       break;
 
-    case constants.UINT16_BE:
-    case constants.USHORT_BE:
+    case 'uint16_be':
+    case 'ushort_be':
       value = readBuffer(handle, address, 2).readUInt16BE();
       break;
 
-    case constants.FLOAT_BE:
+    case 'float_be':
       value = readBuffer(handle, address, 4).readFloatBE();
       break;
 
-    case constants.DOUBLE_BE:
+    case 'double_be':
       value = readBuffer(handle, address, 8).readDoubleBE();
       break;
   }
@@ -138,11 +146,11 @@ export function readBuffer(handle: HANDLE, address: DWORD64, size: number, callb
 
 export function writeMemory<T>(handle: HANDLE, address: DWORD64, value: T, dataType: DataType): boolean {
   let dataValue: T | string = value;
-  if ((dataType === constants.STR || dataType === constants.STRING) && typeof value === 'string') {
+  if ((dataType === 'str' || dataType === 'string') && typeof value === 'string') {
     dataValue = value + '\0'; // add terminator
   }
 
-  const bigintTypes = [constants.INT64, constants.INT64_BE, constants.UINT64, constants.UINT64_BE];
+  const bigintTypes = ['int64', 'int64_be', 'uint64', 'uint64_be'];
   if (bigintTypes.indexOf(dataType) != -1 && typeof value !== 'bigint') {
     throw new Error(`${dataType.toUpperCase()} expects type BigInt`);
   }
@@ -158,7 +166,7 @@ export function writeMemoryBE(handle: HANDLE, address: DWORD64, value: any, data
   let buffer: Buffer | null = null;
 
   switch (dataType) {
-    case constants.INT64_BE:
+    case 'int64_be':
       if (typeof value !== 'bigint') {
         throw new Error('INT64_BE expects type BigInt');
       }
@@ -166,7 +174,7 @@ export function writeMemoryBE(handle: HANDLE, address: DWORD64, value: any, data
       buffer.writeBigInt64BE(value);
       break;
 
-    case constants.UINT64_BE:
+    case 'uint64_be':
       if (typeof value !== 'bigint') {
         throw new Error('UINT64_BE expects type BigInt');
       }
@@ -174,38 +182,38 @@ export function writeMemoryBE(handle: HANDLE, address: DWORD64, value: any, data
       buffer.writeBigUInt64BE(value);
       break;
 
-    case constants.INT32_BE:
-    case constants.INT_BE:
-    case constants.LONG_BE:
+    case 'int32_be':
+    case 'int_be':
+    case 'long_be':
       buffer = Buffer.alloc(4);
       buffer.writeInt32BE(value);
       break;
 
-    case constants.UINT32_BE:
-    case constants.UINT_BE:
-    case constants.ULONG_BE:
+    case 'uint32_be':
+    case 'uint_be':
+    case 'ulong_be':
       buffer = Buffer.alloc(4);
       buffer.writeUInt32BE(value);
       break;
 
-    case constants.INT16_BE:
-    case constants.SHORT_BE:
+    case 'int16_be':
+    case 'short_be':
       buffer = Buffer.alloc(2);
       buffer.writeInt16BE(value);
       break;
 
-    case constants.UINT16_BE:
-    case constants.USHORT_BE:
+    case 'uint16_be':
+    case 'ushort_be':
       buffer = Buffer.alloc(2);
       buffer.writeUInt16BE(value);
       break;
 
-    case constants.FLOAT_BE:
+    case 'float_be':
       buffer = Buffer.alloc(4);
       buffer.writeFloatBE(value);
       break;
 
-    case constants.DOUBLE_BE:
+    case 'double_be':
       buffer = Buffer.alloc(8);
       buffer.writeDoubleBE(value);
       break;
@@ -335,7 +343,7 @@ export function mapViewOfFile(processHandle: HANDLE, fileHandle: HANDLE, offset:
   }
 
   if (arguments.length == 2) {
-    return memoryjs.mapViewOfFile(processHandle, fileHandle, 0, 0, constants.PAGE_READONLY);
+    return memoryjs.mapViewOfFile(processHandle, fileHandle, 0, 0, Protection.PAGE_READONLY);
   }
 
   return memoryjs.mapViewOfFile(processHandle, fileHandle, offset, viewSize, pageProtection);
@@ -370,12 +378,33 @@ const library = {
   Debugger: new Debugger(memoryjs),
 };
 
-export { HANDLE, DWORD64, Callback, Protection, AllocationType, ProcessInfo, ModuleEntry, DataType, Debugger, MemoryBasicInformation };
+export {
+  HANDLE,
+  DWORD64,
+  Callback,
+  Protection,
+  AllocationType,
+  ProcessInfo,
+  ModuleEntry,
+  DataType,
+  Debugger,
+  MemoryBasicInformation,
+  BOOL,
+  DWORD,
+  SIZE_T,
+  ProcessEntry };
 
 export { BufferEncoding, StructronContext };
 
+export {
+  FunctionType,
+  SignatureType,
+  PageType,
+  DebugRegister,
+  BreakpointTriggerType
+}
+
 export default {
-  ...constants,
   ...library,
-  STRUCTRON_TYPE_STRING: STRUCTRON_TYPE_STRING(library as unknown as MemoryJS),
+  STRUCTRON_TYPE_STRING
 };
