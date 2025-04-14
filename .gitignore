@@ -8,3 +8,8 @@ test/vcxproj/Debug
 test/vcxproj/Release
 test/*.exe
 test/.vs
+etc
+temp
+temptypes
+tempbuild
+lib
