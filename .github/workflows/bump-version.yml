@@ -79,8 +79,8 @@ jobs:
           git config --global user.name 'GitHub Action'
           git config --global user.email 'action@github.com'
           git add package.json
-          git commit -m "Bump version to ${{ steps.calculate-version.outputs.new_version }} [skip ci]"
-          git push origin main
+          git commit -m "Bump version to ${{ steps.calculate-version.outputs.new_version }}"
+          git push origin master
           git push origin v${{ steps.calculate-version.outputs.new_version }}
   
       - name: Create GitHub release
