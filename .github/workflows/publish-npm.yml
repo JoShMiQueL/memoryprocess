@@ -49,11 +49,6 @@ jobs:
       - name: Bump version
         run: npm version patch --from-git
 
-      - name: Login to npm
-        run: npm login --scope=@joshmiquel --registry=https://registry.npmjs.org/
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
       - name: Publish to npm
         run: npm publish --provenance --access public
         env:
