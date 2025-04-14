@@ -11,6 +11,7 @@ on:
           - patch
           - minor
           - major
+          - beta
 
 jobs:
   bump-version:
@@ -45,25 +46,35 @@ jobs:
       - name: Calculate new version
         id: calculate-version
         run: |
-          NEW_VERSION=$(echo "${{ steps.get-npm-version.outputs.version }}")
-          IFS='.' read -r major minor patch <<< "$NEW_VERSION"
-
-          case "${{ github.event.inputs.bump_type }}" in
-            "patch")
-              NEW_VERSION="$major.$minor.$((patch + 1))"
-              ;;
-            "minor")
-              NEW_VERSION="$major.$((minor + 1)).0"
-              ;;
-            "major")
-              NEW_VERSION="$((major + 1)).0.0"
-              ;;
-            *)
-              echo "Invalid bump type"
-              exit 1
-              ;;
-          esac
-
+          CURRENT_VERSION=$(echo "${{ steps.get-npm-version.outputs.version }}")
+          if [[ "${{ github.event.inputs.bump_type }}" == "beta" ]]; then
+            # Check if there's already a beta version
+            if [[ $CURRENT_VERSION =~ ^([0-9]+\.[0-9]+\.[0-9]+)-beta\.([0-9]+)$ ]]; then
+              BASE_VERSION="${BASH_REMATCH[1]}"
+              BETA_NUM=${BASH_REMATCH[2]}
+              NEW_VERSION="$BASE_VERSION-beta.$((BETA_NUM + 1))"
+            else
+              # First beta version - start with beta.0
+              NEW_VERSION="$CURRENT_VERSION-beta.0"
+            fi
+          else
+            IFS='.' read -r major minor patch <<< "${CURRENT_VERSION%-*}"
+            case "${{ github.event.inputs.bump_type }}" in
+              "patch")
+                NEW_VERSION="$major.$minor.$((patch + 1))"
+                ;;
+              "minor")
+                NEW_VERSION="$major.$((minor + 1)).0"
+                ;;
+              "major")
+                NEW_VERSION="$((major + 1)).0.0"
+                ;;
+              *)
+                echo "Invalid bump type"
+                exit 1
+                ;;
+            esac
+          fi
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "Calculated new version: $NEW_VERSION"
       
@@ -89,7 +100,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create v${{ steps.calculate-version.outputs.new_version }} \
-            --title "Release v${{ steps.calculate-version.outputs.new_version }}" \
-            --notes "Automated release for @joshmiquel/memoryjs v${{ steps.calculate-version.outputs.new_version }}" \
-            --draft=false
+          if [[ "${{ github.event.inputs.bump_type }}" == "beta" ]]; then
+            gh release create v${{ steps.calculate-version.outputs.new_version }} \
+              --title "Beta Release v${{ steps.calculate-version.outputs.new_version }}" \
+              --notes "Beta release for @joshmiquel/memoryjs v${{ steps.calculate-version.outputs.new_version }}" \
+              --prerelease \
+              --draft=false
+          else
+            gh release create v${{ steps.calculate-version.outputs.new_version }} \
+              --title "Release v${{ steps.calculate-version.outputs.new_version }}" \
+              --notes "Automated release for @joshmiquel/memoryjs v${{ steps.calculate-version.outputs.new_version }}" \
+              --draft=false
+          fi
