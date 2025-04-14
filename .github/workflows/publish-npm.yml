@@ -47,6 +47,10 @@ jobs:
           registry-url: https://registry.npmjs.org/
 
       - name: Publish to npm
+        id: publish
         uses: JS-DevTools/npm-publish@v3
         with:
           token: ${{ secrets.NPM_TOKEN }}
+      
+      - if: ${{ steps.publish.outputs.type }}
+        run: echo "Version changed!"
