@@ -14,13 +14,10 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Check for version change
         id: check
         uses: EndBug/version-check@v2
-        with:
-          file-url: https://unpkg.com/@joshmiquel/memoryjs/package.json
-          static-checking: localIsNew
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
