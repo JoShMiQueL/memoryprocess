@@ -38,13 +38,11 @@
   },
   "homepage": "https://github.com/JoShMiQueL/memoryjs#readme",
   "dependencies": {
-    "eslint": "^8.5.0",
-    "eslint-config-airbnb-base": "^12.1.0",
-    "node-addon-api": "^3.2.1"
+    "node-addon-api": "3.2.1"
   },
   "devDependencies": {
-    "@microsoft/api-extractor": "^7.52.3",
-    "@types/bun": "^1.2.9"
+    "@microsoft/api-extractor": "7.52.3",
+    "@types/bun": "latest"
   },
   "peerDependencies": {
     "typescript": "^5"
