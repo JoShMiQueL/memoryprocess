@@ -1,5 +1,9 @@
 name: Release
 
+permissions:
+  contents: write
+  packages: write
+
 on:
   release:
     types:
@@ -50,8 +54,6 @@ jobs:
   release:
     needs: [build]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write # allows the action to create a release
     steps:
       - name: Checkout
         uses: actions/checkout@v4

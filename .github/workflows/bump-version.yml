@@ -1,4 +1,10 @@
 name: Bump version
+
+permissions:
+  contents: write
+  pull-requests: write
+  packages: write
+
 on:
   workflow_dispatch:
     inputs:
@@ -58,8 +64,6 @@ jobs:
   bump-package:
     needs: prepare
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -76,8 +80,6 @@ jobs:
   release-draft:
     needs: [prepare, bump-package]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
