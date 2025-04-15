@@ -101,9 +101,9 @@ export function getModules(processId: number, callback?: GetModulesCallback): Mo
   return memoryjs.getModules(processId, callback);
 }
 
-export function readMemory<T extends DataType>(handle: number, address: number, dataType: T): DataTypeToType<T>;
-export function readMemory<T extends DataType>(handle: number, address: number, dataType: T, callback: ReadMemoryCallback<DataTypeToType<T>>): void;
-export function readMemory<T extends DataType>(handle: number, address: number, dataType: T, callback?: ReadMemoryCallback<DataTypeToType<T>>): DataTypeToType<T> | void {
+export function readMemory<T extends DataType>(handle: number, address: number | bigint, dataType: T): DataTypeToType<T>;
+export function readMemory<T extends DataType>(handle: number, address: number | bigint, dataType: T, callback: ReadMemoryCallback<DataTypeToType<T>>): void;
+export function readMemory<T extends DataType>(handle: number, address: number | bigint, dataType: T, callback?: ReadMemoryCallback<DataTypeToType<T>>): DataTypeToType<T> | void {
   if (isDataTypeBE(dataType)) {
     return readMemoryBE(handle, address, dataType, callback as any) as any;
   }
@@ -115,9 +115,9 @@ export function readMemory<T extends DataType>(handle: number, address: number, 
   return memoryjs.readMemory(handle, address, dataType, callback);
 }
 
-export function readMemoryBE<T extends DataTypeBE>(handle: number, address: number, dataType: T): DataTypeToTypeBE<T>;
-export function readMemoryBE<T extends DataTypeBE>(handle: number, address: number, dataType: T, callback: ReadMemoryBECallback<DataTypeToTypeBE<T>>): void;
-export function readMemoryBE<T extends DataTypeBE>(handle: number, address: number, dataType: T, callback?: ReadMemoryBECallback<DataTypeToTypeBE<T>>): DataTypeToTypeBE<T> | void {
+export function readMemoryBE<T extends DataTypeBE>(handle: number, address: number | bigint, dataType: T): DataTypeToTypeBE<T>;
+export function readMemoryBE<T extends DataTypeBE>(handle: number, address: number | bigint, dataType: T, callback: ReadMemoryBECallback<DataTypeToTypeBE<T>>): void;
+export function readMemoryBE<T extends DataTypeBE>(handle: number, address: number | bigint, dataType: T, callback?: ReadMemoryBECallback<DataTypeToTypeBE<T>>): DataTypeToTypeBE<T> | void {
   let value = null;
 
   switch (dataType) {
@@ -170,16 +170,16 @@ export function readMemoryBE<T extends DataTypeBE>(handle: number, address: numb
   callback(value === null ? 'Invalid data type argument!' : '', value as DataTypeToTypeBE<T>);
 }
 
-export function readBuffer(handle: number, address: number, size: number): Buffer;
-export function readBuffer(handle: number, address: number, size: number, callback: ReadBufferCallback): void;
-export function readBuffer(handle: number, address: number, size: number, callback?: ReadBufferCallback): Buffer | void {
+export function readBuffer(handle: number, address: number | bigint, size: number): Buffer;
+export function readBuffer(handle: number, address: number | bigint, size: number, callback: ReadBufferCallback): void;
+export function readBuffer(handle: number, address: number | bigint, size: number, callback?: ReadBufferCallback): Buffer | void {
   if (!callback) {
     return memoryjs.readBuffer(handle, address, size);
   }
   return memoryjs.readBuffer(handle, address, size, callback);
 }
 
-export function writeMemory<T extends DataType>(handle: number, address: number, value: DataTypeToWriteType<T>, dataType: T): void {
+export function writeMemory<T extends DataType>(handle: number, address: number | bigint, value: DataTypeToWriteType<T>, dataType: T): void {
   let dataValue: any = value;
   if ((dataType === 'str' || dataType === 'string') && typeof value === 'string') {
     dataValue = value + '\0'; // add terminator
@@ -199,7 +199,7 @@ export function writeMemory<T extends DataType>(handle: number, address: number,
 
 export function writeMemoryBE<T extends DataTypeBE>(
   handle: number, 
-  address: number, 
+  address: number | bigint, 
   value: DataTypeToWriteType<T>, 
   dataType: T
 ): void {
@@ -266,7 +266,7 @@ export function writeMemoryBE<T extends DataTypeBE>(
   return writeBuffer(handle, address, buffer);
 }
 
-export function writeBuffer(handle: number, address: number, buffer: Buffer): void {
+export function writeBuffer(handle: number, address: number | bigint, buffer: Buffer): void {
   return memoryjs.writeBuffer(handle, address, buffer);
 }
 
@@ -280,9 +280,9 @@ export function findPattern(handle: number, pattern: string, flags: number, patt
   return memoryjs.findPattern(handle, pattern, flags, patternOffset, callback);
 }
 
-export function callFunction(handle: number, args: FunctionArg[], returnType: FunctionType, address: number): FunctionReturnValue;
-export function callFunction(handle: number, args: FunctionArg[], returnType: FunctionType, address: number, callback: CallFunctionCallback): void;
-export function callFunction(handle: number, args: FunctionArg[], returnType: FunctionType, address: number, callback?: CallFunctionCallback): FunctionReturnValue | void {
+export function callFunction(handle: number, args: FunctionArg[], returnType: FunctionType, address: number | bigint): FunctionReturnValue;
+export function callFunction(handle: number, args: FunctionArg[], returnType: FunctionType, address: number | bigint, callback: CallFunctionCallback): void;
+export function callFunction(handle: number, args: FunctionArg[], returnType: FunctionType, address: number | bigint, callback?: CallFunctionCallback): FunctionReturnValue | void {
   if (!callback) {
     return memoryjs.callFunction(handle, args, returnType, address);
   }
@@ -290,9 +290,9 @@ export function callFunction(handle: number, args: FunctionArg[], returnType: Fu
   return memoryjs.callFunction(handle, args, returnType, address, callback);
 }
 
-export function virtualAllocEx(handle: number, address: number | null, size: number, allocationType: AllocationType, protection: Protection): number;
-export function virtualAllocEx(handle: number, address: number | null, size: number, allocationType: AllocationType, protection: Protection, callback: VirtualAllocExCallback): void;
-export function virtualAllocEx(handle: number, address: number | null, size: number, allocationType: AllocationType, protection: Protection, callback?: VirtualAllocExCallback): number | void {
+export function virtualAllocEx(handle: number, address: number | bigint | null, size: number, allocationType: AllocationType, protection: Protection): number;
+export function virtualAllocEx(handle: number, address: number | bigint | null, size: number, allocationType: AllocationType, protection: Protection, callback: VirtualAllocExCallback): void;
+export function virtualAllocEx(handle: number, address: number | bigint | null, size: number, allocationType: AllocationType, protection: Protection, callback?: VirtualAllocExCallback): number | void {
   if (!callback) {
     return memoryjs.virtualAllocEx(handle, address, size, allocationType, protection);
   }
@@ -300,9 +300,9 @@ export function virtualAllocEx(handle: number, address: number | null, size: num
   return memoryjs.virtualAllocEx(handle, address, size, allocationType, protection, callback);
 }
 
-export function virtualProtectEx(handle: number, address: number, size: number, protection: Protection): number;
-export function virtualProtectEx(handle: number, address: number, size: number, protection: Protection, callback: VirtualProtectExCallback): void;
-export function virtualProtectEx(handle: number, address: number, size: number, protection: Protection, callback?: VirtualProtectExCallback): number | void {
+export function virtualProtectEx(handle: number, address: number | bigint, size: number, protection: Protection): number;
+export function virtualProtectEx(handle: number, address: number | bigint, size: number, protection: Protection, callback: VirtualProtectExCallback): void;
+export function virtualProtectEx(handle: number, address: number | bigint, size: number, protection: Protection, callback?: VirtualProtectExCallback): number | void {
   if (!callback) {
     return memoryjs.virtualProtectEx(handle, address, size, protection);
   }
@@ -320,9 +320,9 @@ export function getRegions(handle: number, callback?: GetRegionsCallback): Memor
   return memoryjs.getRegions(handle, callback);
 }
 
-export function virtualQueryEx(handle: number, address: number): MemoryRegion;
-export function virtualQueryEx(handle: number, address: number, callback: VirtualQueryExCallback): void;
-export function virtualQueryEx(handle: number, address: number, callback?: VirtualQueryExCallback): MemoryRegion | void {
+export function virtualQueryEx(handle: number, address: number | bigint): MemoryRegion;
+export function virtualQueryEx(handle: number, address: number | bigint, callback: VirtualQueryExCallback): void;
+export function virtualQueryEx(handle: number, address: number | bigint, callback?: VirtualQueryExCallback): MemoryRegion | void {
   if (!callback) {
     return memoryjs.virtualQueryEx(handle, address);
   }
@@ -348,11 +348,11 @@ export function injectDll(handle: number, dllPath: string, callback?: InjectDllC
   return memoryjs.injectDll(handle, dllPath, callback);
 }
 
-export function unloadDll(handle: number, moduleAddress: number): boolean;
+export function unloadDll(handle: number, moduleaddress: number | bigint): boolean;
 export function unloadDll(handle: number, moduleName: string): boolean;
-export function unloadDll(handle: number, moduleAddress: number, callback: UnloadDllCallback): void;
+export function unloadDll(handle: number, moduleaddress: number | bigint, callback: UnloadDllCallback): void;
 export function unloadDll(handle: number, moduleName: string, callback: UnloadDllCallback): void;
-export function unloadDll(handle: number, moduleAddressOrName: number | string, callback?: UnloadDllCallback): boolean | void {
+export function unloadDll(handle: number, moduleAddressOrName: number | bigint | string, callback?: UnloadDllCallback): boolean | void {
   // Handle synchronous calls
   if (!callback) {
     if (typeof moduleAddressOrName === 'number') {
