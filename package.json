@@ -8,7 +8,7 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "build": "bun run build.ts",
-    "buildtest": "cd test && MSBuild.exe project.sln //p:Configuration=Release"
+    "check": "biome check --write "
   },
   "repository": {
     "type": "git",
@@ -32,7 +32,6 @@
     }
   ],
   "license": "MIT",
-  "gypfile": true,
   "bugs": {
     "url": "https://github.com/JoShMiQueL/memoryjs/issues"
   },
@@ -41,10 +40,16 @@
     "node-addon-api": "3.2.1"
   },
   "devDependencies": {
+    "@biomejs/biome": "1.9.4",
     "@microsoft/api-extractor": "7.52.3",
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "lefthook": "1.11.10"
   },
   "peerDependencies": {
     "typescript": "^5"
-  }
+  },
+  "trustedDependencies": [
+    "@biomejs/biome",
+    "lefthook"
+  ]
 }
