@@ -32,24 +32,6 @@ jobs:
         with:
           bun-version: latest
 
-      - name: Cache Bun dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.bun
-            node_modules
-          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
-
-      - name: Cache build outputs
-        id: cache-build
-        uses: actions/cache@v4
-        with:
-          path: |
-            build/
-            lib/
-            ~/.cache/node-gyp
-          key: ${{ runner.os }}-build-${{ hashFiles('package.json', 'bun.lock', 'binding.gyp', 'src/**/*.ts') }}
-
       - name: Install node-gyp
         run: bun add -g node-gyp
 
@@ -57,7 +39,6 @@ jobs:
         run: bun install --ignore-scripts
 
       - name: Build
-        if: steps.cache-build.outputs.cache-hit != 'true'
         run: bun run build
 
       - name: Upload artifact
