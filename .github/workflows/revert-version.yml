@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version_to_revert:
-        description: 'Version tag to revert (e.g., v1.0.0)'
+        description: 'Version tag to revert (e.g., v1.0.0 or latest)'
         required: true
       reason:
         description: 'Reason for reverting'
@@ -26,19 +26,28 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Get version to revert
+        id: get-version
+        run: |
+          if [ "${{ github.event.inputs.version_to_revert }}" = "latest" ]; then
+            VERSION=$(git describe --tags --abbrev=0)
+          else
+            VERSION=${{ github.event.inputs.version_to_revert }}
+          fi
+          echo "version_to_revert=${VERSION}" >> $GITHUB_OUTPUT
+
       - name: Get previous version
         id: get-prev-version
         run: |
-          # Get the tag before the one we want to revert
-          PREV_TAG=$(git describe --tags --abbrev=0 ${{ github.event.inputs.version_to_revert }}^)
+          PREV_TAG=$(git describe --tags --abbrev=0 ${{ steps.get-version.outputs.version_to_revert }}^)
           echo "prev_version=${PREV_TAG#v}" >> $GITHUB_OUTPUT
 
       - name: Delete release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release delete ${{ github.event.inputs.version_to_revert }} --yes || true
-          git push origin :refs/tags/${{ github.event.inputs.version_to_revert }} || true
+          gh release delete ${{ steps.get-version.outputs.version_to_revert }} --yes || true
+          git push origin :refs/tags/${{ steps.get-version.outputs.version_to_revert }} || true
 
       - name: Revert package.json
         run: |
