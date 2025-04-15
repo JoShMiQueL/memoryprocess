@@ -1,38 +1,44 @@
 typescript:
-  - '**/*.ts'
+  - changed-files:
+      any-glob-to-any-file: ['**/*.ts']
 
 native:
-  - 'native/**/*'
-  - 'binding.gyp'
+  - changed-files:
+      any-glob-to-any-file: ['native/**/*', 'binding.gyp']
 
 documentation:
-  - 'README.md'
-  - 'docs/**/*'
+  - changed-files:
+      any-glob-to-any-file: ['README.md', 'docs/**/*']
 
 tests:
-  - 'test/**/*'
+  - changed-files:
+      any-glob-to-any-file: ['test/**/*']
 
 examples:
-  - 'examples/**/*'
+  - changed-files:
+      any-glob-to-any-file: ['examples/**/*']
 
 build:
-  - 'build.ts'
-  - 'build/**/*'
-  - 'tsconfig.json'
+  - changed-files:
+      any-glob-to-any-file: ['build.ts', 'build/**/*', 'tsconfig.json']
 
 dependencies:
-  - 'package.json'
-  - 'bun.lock'
+  - changed-files:
+      any-glob-to-any-file: ['package.json', 'bun.lock']
 
 config:
-  - 'config/**/*'
-  - '.gitignore'
-  - '.npmignore'
-  - '.gitattributes'
-  - 'lefthook.yml'
-  - 'biome.json'
-  - '.github/*'
-  - '.github/!(workflows)/**/*'
+  - changed-files:
+      any-glob-to-any-file: [
+        'config/**/*',
+        '.gitignore',
+        '.npmignore',
+        '.gitattributes',
+        'lefthook.yml',
+        'biome.json',
+        '.github/*',
+        '.github/!(workflows)/**/*'
+      ]
 
 ci:
-  - '.github/workflows/**/*'
+  - changed-files:
+      any-glob-to-any-file: ['.github/workflows/**/*']
