@@ -1,0 +1,52 @@
+name: Revert Version
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_to_revert:
+        description: 'Version tag to revert (e.g., v1.0.0)'
+        required: true
+      reason:
+        description: 'Reason for reverting'
+        required: true
+
+jobs:
+  revert:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Get previous version
+        id: get-prev-version
+        run: |
+          # Get the tag before the one we want to revert
+          PREV_TAG=$(git describe --tags --abbrev=0 ${{ github.event.inputs.version_to_revert }}^)
+          echo "prev_version=${PREV_TAG#v}" >> $GITHUB_OUTPUT
+
+      - name: Delete release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete ${{ github.event.inputs.version_to_revert }} --yes || true
+          git push origin :refs/tags/${{ github.event.inputs.version_to_revert }} || true
+
+      - name: Revert package.json
+        run: |
+          git config --global user.email "actions@github.com"
+          git config --global user.name "GitHub Actions"
+          npm version ${{ steps.get-prev-version.outputs.prev_version }} --no-git-tag-version
+          git add package.json
+          git commit -m "revert: bump version back to ${{ steps.get-prev-version.outputs.prev_version }} 
+          
+          Reason: ${{ github.event.inputs.reason }}"
+          git push
