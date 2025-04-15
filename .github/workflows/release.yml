@@ -1,27 +1,17 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - '*'
+  release:
+    types:
+      - published
   workflow_dispatch:
     inputs:
       checkout-branch:
         description: 'The branch or tag to checkout (same as workflow if not specified)'
         required: false
 
-jobs:
-  prepare:
-    runs-on: ubuntu-latest
-    outputs:
-      lastest-tag: ${{ steps.get-tag.outputs.tag }}
-    steps:
-      - name: Get latest tag
-        id: get-tag
-        uses: WyriHaximus/github-action-get-previous-tag@v1.4.0
-    
+jobs: 
   build:
-    needs: prepare
     strategy:
       fail-fast: false
     runs-on: windows-2019
@@ -52,7 +42,7 @@ jobs:
           path: lib/
   
   release:
-    needs: [prepare, build]
+    needs: [build]
     runs-on: ubuntu-latest
     permissions:
       contents: write # allows the action to create a release

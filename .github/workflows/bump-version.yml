@@ -10,26 +10,76 @@ on:
           - patch
           - minor
           - major
+          - alpha
           - beta
 
 jobs:
-  bump-version:
-    runs-on: ubuntu-22.04
-    permissions:
-      contents: write
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      latest_version: ${{ steps.get-latest-version.outputs.lastest_version }}
+      latest_beta_version: ${{ steps.get-latest-version.outputs.lastest_beta_version }}
+      latest_alpha_version: ${{ steps.get-latest-version.outputs.lastest_alpha_version }}
+      next_version: ${{ steps.calculate-next-version.outputs.next_version }}
     steps:
-    - uses: actions/checkout@v4
-      with:
-        fetch-depth: '0'
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install semver
+        run: npm install -g semver
 
-    - name: Bump version and push tag
-      id: tag
-      uses: anothrNick/github-tag-action@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        WITH_V: true
-        DEFAULT_BUMP: ${{ github.event.inputs.bump_type }}
-        PRERELEASE: ${{ github.event.inputs.bump_type == 'beta' }}
-        
-    - run: |
-        echo "Bumped version from ${{ steps.tag.outputs.tag }} to ${{ steps.tag.outputs.new_tag }}"
+      - name: Get latest version from npm
+        id: get-latest-version
+        run: |
+          echo "lastest_version=$(npm view @joshmiquel/memoryjs version | tr -d '\n')" >> $GITHUB_OUTPUT
+          echo "lastest_beta_version=$(npm view @joshmiquel/memoryjs dist-tags.beta | tr -d '\n')" >> $GITHUB_OUTPUT
+          echo "lastest_alpha_version=$(npm view @joshmiquel/memoryjs dist-tags.alpha | tr -d '\n')" >> $GITHUB_OUTPUT
+
+      - name: Calculate next version with semver
+        id: calculate-next-version
+        run: |
+          if [[ "${{ github.event.inputs.bump_type }}" == "patch" ]]; then
+            echo "next_version=$(semver -i patch ${{ steps.get-latest-version.outputs.lastest_version }})" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event.inputs.bump_type }}" == "minor" ]]; then
+            echo "next_version=$(semver -i minor ${{ steps.get-latest-version.outputs.lastest_version }})" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event.inputs.bump_type }}" == "major" ]]; then
+            echo "next_version=$(semver -i major ${{ steps.get-latest-version.outputs.lastest_version }})" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event.inputs.bump_type }}" == "beta" ]]; then
+            echo "next_version=$(semver -i prerelease --preid beta ${{ steps.get-latest-version.outputs.lastest_beta_version || steps.get-latest-version.outputs.lastest_version }})" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event.inputs.bump_type }}" == "alpha" ]]; then
+            echo "next_version=$(semver -i prerelease --preid alpha ${{ steps.get-latest-version.outputs.lastest_alpha_version || steps.get-latest-version.outputs.lastest_version }})" >> $GITHUB_OUTPUT
+          fi
+  
+  bump-package:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Bump package
+        run: |
+          npm version ${{ inputs.bump_type }} --no-git-tag-version
+          git add package.json
+          git commit -m "chore: bump version to ${{ needs.prepare.outputs.next_version }}"
+          git push
+
+  bump:
+    needs: [prepare, bump-package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # allows the action to create a release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: GH Release
+        uses: softprops/action-gh-release@v2.2.1
+        with:
+          draft: true
+          prerelease: ${{ inputs.bump_type == 'alpha' || inputs.bump_type == 'beta' }}
+          tag_name: v${{ needs.prepare.outputs.next_version }}
