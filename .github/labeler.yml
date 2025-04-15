@@ -1,0 +1,38 @@
+typescript:
+  - '**/*.ts'
+
+native:
+  - 'native/**/*'
+  - 'binding.gyp'
+
+documentation:
+  - 'README.md'
+  - 'docs/**/*'
+
+tests:
+  - 'test/**/*'
+
+examples:
+  - 'examples/**/*'
+
+build:
+  - 'build.ts'
+  - 'build/**/*'
+  - 'tsconfig.json'
+
+dependencies:
+  - 'package.json'
+  - 'bun.lock'
+
+config:
+  - 'config/**/*'
+  - '.gitignore'
+  - '.npmignore'
+  - '.gitattributes'
+  - 'lefthook.yml'
+  - 'biome.json'
+  - '.github/*'
+  - '.github/!(workflows)/**/*'
+
+ci:
+  - '.github/workflows/**/*'
