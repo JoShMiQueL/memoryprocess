@@ -58,6 +58,8 @@ jobs:
   bump-package:
     needs: prepare
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -71,7 +73,7 @@ jobs:
           git commit -m "chore: bump version to ${{ needs.prepare.outputs.next_version }}"
           git push
 
-  bump:
+  bump-tag:
     needs: [prepare, bump-package]
     runs-on: ubuntu-latest
     permissions:
