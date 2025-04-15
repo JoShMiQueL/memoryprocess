@@ -55,6 +55,9 @@ jobs:
 
       - name: Download artifacts
         uses: actions/download-artifact@v4.1.7
+        with:
+          name: memoryjs
+          path: lib/
 
       - name: Setup Node
         uses: actions/setup-node@v4
