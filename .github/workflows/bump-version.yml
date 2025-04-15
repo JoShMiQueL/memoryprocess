@@ -88,4 +88,4 @@ jobs:
           draft: true
           prerelease: ${{ inputs.bump_type == 'alpha' || inputs.bump_type == 'beta' }}
           tag_name: v${{ needs.prepare.outputs.next_version }}
-          body_path: release_body.md
+          generate_release_notes: true
