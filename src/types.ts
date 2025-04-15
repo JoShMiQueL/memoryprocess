@@ -124,9 +124,9 @@ export type DataTypeToType<T extends DataType> =
 
 export type ReadMemoryCallback<T> = (error: string, value: T) => void;
 export type ReadMemoryFunction = {
-  <T extends DataType>(handle: number, address: bigint, dataType: T): DataTypeToType<T>;
-  <T extends DataType>(handle: number, address: bigint, dataType: T, callback: ReadMemoryCallback<DataTypeToType<T>>): void;
-  <T extends DataType>(handle: number, address: bigint, dataType: T, callback?: ReadMemoryCallback<DataTypeToType<T>>): DataTypeToType<T> | void;
+  <T extends DataType>(handle: number, address: number, dataType: T): DataTypeToType<T>;
+  <T extends DataType>(handle: number, address: number, dataType: T, callback: ReadMemoryCallback<DataTypeToType<T>>): void;
+  <T extends DataType>(handle: number, address: number, dataType: T, callback?: ReadMemoryCallback<DataTypeToType<T>>): DataTypeToType<T> | void;
 }
 
 export type DataTypeBE = 
@@ -152,16 +152,16 @@ export type DataTypeToTypeBE<T extends DataTypeBE> =
 
 export type ReadMemoryBECallback<T> = (error: string, value: T) => void;
 export type ReadMemoryBEFunction = {
-  <T extends DataTypeBE>(handle: number, address: bigint, dataType: T): DataTypeToTypeBE<T>;
-  <T extends DataTypeBE>(handle: number, address: bigint, dataType: T, callback: ReadMemoryBECallback<DataTypeToTypeBE<T>>): void;
-  <T extends DataTypeBE>(handle: number, address: bigint, dataType: T, callback?: ReadMemoryBECallback<DataTypeToTypeBE<T>>): DataTypeToTypeBE<T> | void;
+  <T extends DataTypeBE>(handle: number, address: number, dataType: T): DataTypeToTypeBE<T>;
+  <T extends DataTypeBE>(handle: number, address: number, dataType: T, callback: ReadMemoryBECallback<DataTypeToTypeBE<T>>): void;
+  <T extends DataTypeBE>(handle: number, address: number, dataType: T, callback?: ReadMemoryBECallback<DataTypeToTypeBE<T>>): DataTypeToTypeBE<T> | void;
 }
 
 export type ReadBufferCallback = (error: string, buffer: Buffer) => void;
 export type ReadBufferFunction = {
-  (handle: number, address: bigint, size: number): Buffer;
-  (handle: number, address: bigint, size: number, callback: ReadBufferCallback): void;
-  (handle: number, address: bigint, size: number, callback?: ReadBufferCallback): Buffer | void;
+  (handle: number, address: number, size: number): Buffer;
+  (handle: number, address: number, size: number, callback: ReadBufferCallback): void;
+  (handle: number, address: number, size: number, callback?: ReadBufferCallback): Buffer | void;
 }
 
 export type DataTypeToWriteType<T extends DataType> = 
@@ -184,18 +184,18 @@ export type DataTypeToWriteType<T extends DataType> =
   never;
 
 export type WriteMemoryFunction = {
-  <T extends DataType>(handle: number, address: bigint, value: DataTypeToWriteType<T>, dataType: T): void;
+  <T extends DataType>(handle: number, address: number, value: DataTypeToWriteType<T>, dataType: T): void;
 }
 
 export type WriteBufferFunction = {
-  (handle: number, address: bigint, buffer: Buffer): void;
+  (handle: number, address: number, buffer: Buffer): void;
 }
 
-export type FindPatternCallback = (error: string, address: bigint) => void;
+export type FindPatternCallback = (error: string, address: number) => void;
 export type FindPatternFunction = {
-  (handle: number, pattern: string, flags: number, patternOffset: number): bigint;
+  (handle: number, pattern: string, flags: number, patternOffset: number): number;
   (handle: number, pattern: string, flags: number, patternOffset: number, callback: FindPatternCallback): void;
-  (handle: number, pattern: string, flags: number, patternOffset: number, callback?: FindPatternCallback): bigint | void;
+  (handle: number, pattern: string, flags: number, patternOffset: number, callback?: FindPatternCallback): number | void;
 }
 
 export enum FunctionType {
@@ -216,8 +216,8 @@ export type FunctionReturnValue = {
 }
 export type CallFunctionCallback = (error: string, result: FunctionReturnValue) => void;
 export type CallFunctionFunction = {
-  (handle: number, args: FunctionArg[], returnType: FunctionType, address: bigint): FunctionReturnValue;
-  (handle: number, args: FunctionArg[], returnType: FunctionType, address: bigint, callback: CallFunctionCallback): void;
+  (handle: number, args: FunctionArg[], returnType: FunctionType, address: number): FunctionReturnValue;
+  (handle: number, args: FunctionArg[], returnType: FunctionType, address: number, callback: CallFunctionCallback): void;
 }
 
 export enum Protection {
@@ -249,21 +249,21 @@ export enum AllocationType {
   MEM_LARGE_PAGES = 0x20000000
 }
 
-export type VirtualAllocExCallback = (error: string, address: bigint) => void;
+export type VirtualAllocExCallback = (error: string, address: number) => void;
 export type VirtualAllocExFunction = {
-  (handle: number, address: bigint | null, size: number, allocationType: AllocationType, protection: Protection): bigint;
-  (handle: number, address: bigint | null, size: number, allocationType: AllocationType, protection: Protection, callback: VirtualAllocExCallback): void;
+  (handle: number, address: number | null, size: number, allocationType: AllocationType, protection: Protection): number;
+  (handle: number, address: number | null, size: number, allocationType: AllocationType, protection: Protection, callback: VirtualAllocExCallback): void;
 }
 
 export type VirtualProtectExCallback = (error: string, oldProtection: Protection) => void;
 export type VirtualProtectExFunction = {
-  (handle: number, address: bigint, size: number, protection: Protection): number;
-  (handle: number, address: bigint, size: number, protection: Protection, callback: VirtualProtectExCallback): void;
+  (handle: number, address: number, size: number, protection: Protection): number;
+  (handle: number, address: number, size: number, protection: Protection, callback: VirtualProtectExCallback): void;
 }
 
 export interface MemoryRegion {
-  BaseAddress: bigint;
-  AllocationBase: bigint;
+  BaseAddress: number;
+  AllocationBase: number;
   AllocationProtect: Protection;
   RegionSize: number;
   State: number;
@@ -279,8 +279,8 @@ export type GetRegionsFunction = {
 
 export type VirtualQueryExCallback = (error: string, region: MemoryRegion) => void;
 export type VirtualQueryExFunction = {
-  (handle: number, address: bigint): MemoryRegion;
-  (handle: number, address: bigint, callback: VirtualQueryExCallback): void;
+  (handle: number, address: number): MemoryRegion;
+  (handle: number, address: number, callback: VirtualQueryExCallback): void;
 }
 
 export type InjectDllCallback = (error: string, success: boolean) => void;
@@ -324,10 +324,10 @@ export interface MemoryJS {
     threadId: number;
     exceptionCode: number;
     exceptionFlags: number;
-    exceptionAddress: bigint;
+    exceptionAddress: number;
     hardwareRegister: number;
   } | null;
   handleDebugEvent: (processId: number, threadId: number) => boolean;
-  setHardwareBreakpoint: (processId: number, address: bigint, register: number, trigger: number, size: number) => boolean;
+  setHardwareBreakpoint: (processId: number, address: number, register: number, trigger: number, size: number) => boolean;
   removeHardwareBreakpoint: (processId: number, hardwareRegister: number) => boolean;
 };
