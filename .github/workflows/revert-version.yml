@@ -39,7 +39,7 @@ jobs:
       - name: Get previous version
         id: get-prev-version
         run: |
-          PREV_TAG=$(git describe --tags --abbrev=0 ${{ steps.get-version.outputs.version_to_revert }}^)
+          PREV_TAG=$(git describe --tags --abbrev=0 --exclude=${{ steps.get-version.outputs.version_to_revert }})
           echo "prev_version=${PREV_TAG#v}" >> $GITHUB_OUTPUT
 
       - name: Delete release
