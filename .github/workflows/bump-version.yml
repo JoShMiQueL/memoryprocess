@@ -78,53 +78,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      pull-requests: read
-      issues: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Generate Release Notes
-        id: generate-notes
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # Obtener versiones
-          PREVIOUS_VERSION=${{ needs.prepare.outputs.latest_version }}
-          NEXT_VERSION=${{ needs.prepare.outputs.next_version }}
-      
-          # Generar enlace de comparación
-          COMPARE_LINK="https://github.com/${{ github.repository }}/compare/v${PREVIOUS_VERSION}...v${NEXT_VERSION}"
-      
-          # Obtener PRs merged entre versiones usando la API de GitHub
-          PR_LIST=$(gh api -H "Accept: application/vnd.github+json" \
-            "/repos/${{ github.repository }}/pulls?state=closed&sort=updated&direction=desc" \
-            --jq '.[] | select(.merged_at and .base.ref == "main") | "- \(.title) by @\(.user.login) in #\(.number)"')
-      
-          # Filtrar PRs relevantes (puedes ajustar la lógica si necesitas comparar con tags específicos)
-          COMMITS=$(echo "$PR_LIST" | head -n 50) # Limita a 50 PRs para evitar exceso
-      
-          # Obtener nuevos contributors (primera contribución en este rango)
-          NEW_CONTRIBUTORS=$(gh api -H "Accept: application/vnd.github+json" \
-            "/repos/${{ github.repository }}/pulls?state=closed" \
-            --jq '[.[] | select(.merged_at) | {login: .user.login, number: .number}] | 
-                   group_by(.login) | map(select(length == 1)) | .[] | .[0] | 
-                   "@\(.login) made their first contribution in #\(.number)"' | sort)
-      
-          # Crear el body del release
-          cat << EOF > release_body.md
-          # Release v${NEXT_VERSION}
-      
-          ## What's Changed
-          ${COMMITS}
-      
-          ## New Contributors
-          ${NEW_CONTRIBUTORS}
-      
-          ## Full Changelog
-          ${COMPARE_LINK}
-          EOF
-        shell: bash
 
       - name: GH Release
         uses: softprops/action-gh-release@v2.2.1
