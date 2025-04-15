@@ -21,20 +21,53 @@ jobs:
         with:
           ref: ${{ github.event.inputs.checkout-branch }}
           submodules: true
+
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.bun
+            node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+
+      - name: Cache build outputs
+        id: cache-build
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/
+            lib/
+            ~/.cache/node-gyp
+          key: ${{ runner.os }}-build-${{ hashFiles('package.json', 'bun.lock', 'binding.gyp', 'src/**/*.ts') }}
+
       - name: Install node-gyp
         run: bun add -g node-gyp
+
       - name: Install dependencies
         run: bun install --ignore-scripts
+
+      - name: Check if build exists
+        id: check-build
+        run: echo "build_exists=$(test -d build && echo true || echo false)" >> $GITHUB_OUTPUT
+
+      - name: Build native modules
+        if: steps.check-build.outputs.build_exists != 'true'
+        run: node-gyp rebuild --jobs max
+
       - name: Build
+        if: steps.cache-build.outputs.cache-hit != 'true'
         run: bun run build
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
