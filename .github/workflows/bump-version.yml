@@ -4,6 +4,7 @@ permissions:
   contents: write
   pull-requests: write
   packages: write
+  security-events: write # Required for CodeQL to upload results
 
 on:
   workflow_dispatch:
@@ -75,7 +76,19 @@ jobs:
           npm version ${{ inputs.bump_type }} --no-git-tag-version
           git add package.json
           git commit -m "chore: bump version to ${{ needs.prepare.outputs.next_version }}"
-          git push
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript
+      
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          upload: true
+
+      - name: Push changes
+        run: git push
 
   release-draft:
     needs: [prepare, bump-package]
