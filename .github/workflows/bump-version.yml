@@ -64,6 +64,8 @@ jobs:
       
       - name: Bump package
         run: |
+          git config --global user.email "actions@github.com"
+          git config --global user.name "Actions"
           npm version ${{ inputs.bump_type }} --no-git-tag-version
           git add package.json
           git commit -m "chore: bump version to ${{ needs.prepare.outputs.next_version }}"
