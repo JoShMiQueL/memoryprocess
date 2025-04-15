@@ -1,5 +1,3 @@
-import { join } from 'path';
-
 interface BuildOptions {
   arch?: 'x64' | 'ia32';
   debug?: boolean;
@@ -27,6 +25,7 @@ async function execCommand(command: string[], cwd?: string): Promise<void> {
   if (proc.exitCode !== 0) {
     const error = new Error(`Command failed: ${command.join(' ')}\n${proc.stderr.toString()}`);
     log(error.message, 'error');
+    log(proc.stderr.toString(), 'error');
     throw error;
   }
   
