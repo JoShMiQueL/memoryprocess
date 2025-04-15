@@ -1,6 +1,6 @@
 {
   "name": "@joshmiquel/memoryjs",
-  "version": "3.6.0",
+  "version": "3.6.1",
   "description": "Maintained fork of memoryjs with critical fixes. Includes /Zc:strictStrings compiler fixes and other improvements. Original package by Rob--",
   "type": "module",
   "main": "lib/index.js",
