@@ -26,8 +26,13 @@ dependencies:
 
 config:
   - 'config/**/*'
-  - '.github/**/*'
   - '.gitignore'
   - '.npmignore'
+  - '.gitattributes'
   - 'lefthook.yml'
   - 'biome.json'
+  - '.github/*'
+  - '.github/!(workflows)/**/*'
+
+ci:
+  - '.github/workflows/**/*'
