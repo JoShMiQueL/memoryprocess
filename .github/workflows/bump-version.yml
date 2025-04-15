@@ -4,9 +4,7 @@ permissions:
   contents: write
   pull-requests: write
   packages: write
-  security-events: write # Required for CodeQL to upload results
   
-
 on:
   workflow_dispatch:
     inputs:
@@ -72,6 +70,11 @@ jobs:
         with:
           fetch-depth: 0
       
+      - name: Create branch
+        run: |
+          branch_name="bump/${{ needs.prepare.outputs.next_version }}"
+          git checkout -b $branch_name
+
       - name: Bump package
         run: |
           git config --global user.email "actions@github.com"
@@ -79,19 +82,19 @@ jobs:
           npm version ${{ inputs.bump_type }} --no-git-tag-version
           git add package.json
           git commit -m "chore: bump version to ${{ needs.prepare.outputs.next_version }}"
+          git push origin $branch_name
 
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
         with:
-          languages: javascript
-      
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
-        with:
-          upload: true
-
-      - name: Push changes
-        run: git push
+          title: "chore: bump version to ${{ needs.prepare.outputs.next_version }}"
+          body: |
+            Automated version bump to ${{ needs.prepare.outputs.next_version }}
+            
+            This PR was automatically created by the version bump workflow.
+          branch: bump/${{ needs.prepare.outputs.next_version }}
+          base: main
+          labels: bump
 
   release-draft:
     needs: [prepare, bump-package]
