@@ -18,7 +18,7 @@ function log(message: string, type: 'info' | 'success' | 'error' = 'info') {
   console.log(`${colors[type]}${message}${colors.reset}`);
 }
 
-async function execCommand(command: string[], cwd?: string): Promise<void> {
+async function execCommand(command: string[], cwd?: string): Promise<undefined> {
   const startTime = performance.now();
   const proc = Bun.spawnSync(command, { cwd });
   
