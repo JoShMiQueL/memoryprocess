@@ -1,19 +1,39 @@
 {
-  "name": "@joshmiquel/memoryjs",
-  "version": "3.6.1",
-  "description": "Maintained fork of memoryjs with critical fixes. Includes /Zc:strictStrings compiler fixes and other improvements. Original package by Rob--",
+  "name": "memoryprocess",
+  "version": "0.1.0-beta.0",
   "type": "module",
-  "main": "lib/index.js",
-  "types": "lib/index.d.ts",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "bun run build.ts",
-    "check": "biome check --write "
-  },
+  "author": "JoShMiQueL",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/JoShMiQueL/memoryjs.git"
+    "url": "git+https://github.com/JoShMiQueL/memoryprocess.git"
   },
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "bun": "./lib/index.js",
+      "node": "./lib/node-error.js",
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "engineStrict": true,
+  "engines": {
+    "bun": ">=1.2.9"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "1.9.4",
+    "@microsoft/api-extractor": "7.52.3",
+    "@types/bun": "latest",
+    "lefthook": "1.11.10"
+  },
+  "peerDependencies": {
+    "typescript": "^5.8.3"
+  },
+  "bugs": {
+    "url": "https://github.com/JoShMiQueL/memoryprocess/issues"
+  },
+  "description": "Maintained fork of memoryjs (Bun-only) with critical fixes. Requires Bun runtime.",
+  "homepage": "https://github.com/JoShMiQueL/memoryprocess#readme",
   "keywords": [
     "memory",
     "reading",
@@ -24,29 +44,10 @@
     "windows-memory",
     "process-memory"
   ],
-  "author": "JoShMiQueL",
-  "contributors": [
-    {
-      "name": "Rob--",
-      "url": "https://github.com/Rob--"
-    }
-  ],
   "license": "MIT",
-  "bugs": {
-    "url": "https://github.com/JoShMiQueL/memoryjs/issues"
-  },
-  "homepage": "https://github.com/JoShMiQueL/memoryjs#readme",
-  "dependencies": {
-    "node-addon-api": "8.3.1"
-  },
-  "devDependencies": {
-    "@biomejs/biome": "1.9.4",
-    "@microsoft/api-extractor": "7.52.3",
-    "@types/bun": "latest",
-    "lefthook": "1.11.10"
-  },
-  "peerDependencies": {
-    "typescript": "^5"
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "check": "biome check --write"
   },
   "trustedDependencies": [
     "@biomejs/biome",
