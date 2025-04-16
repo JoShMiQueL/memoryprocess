@@ -3,17 +3,6 @@
 #include <vector>
 #include "process.h"
 
-typedef struct {
-  int dwSize;
-  int th32ProcessID;
-  int cntThreads;
-  int th32ParentProcessID;
-  int pcPriClassBase;
-  char szExeFile[MAX_PATH];
-  uintptr_t handle;
-  uintptr_t modBaseAddr;
-} ProcessInfo;
-
 process::process() {}
 process::~process() {}
 
