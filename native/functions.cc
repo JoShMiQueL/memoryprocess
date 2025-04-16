@@ -1,7 +1,5 @@
-#include <node.h>
 #include <windows.h>
 #include <TlHelp32.h>
-#include <vector>
 #include "functions.h"
 
 char functions::readChar(HANDLE hProcess, DWORD64 address) {

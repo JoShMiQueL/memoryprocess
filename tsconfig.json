@@ -4,7 +4,7 @@
     "sourceMap": true,
     "declarationMap": true,
     "emitDeclarationOnly": true,
-    "outDir": "temptypes",
+    "outDir": "lib",
 
     // Environment setup & latest features
     "lib": ["ESNext"],
@@ -12,11 +12,10 @@
     "module": "ESNext",
     "moduleDetection": "force",
     "jsx": "react-jsx",
-    "allowJs": true,
 
     // Bundler mode
     "moduleResolution": "bundler",
-    "allowImportingTsExtensions": true,
+    // "allowImportingTsExtensions": true,
     // "verbatimModuleSyntax": true,
     // "noEmit": true,
 
@@ -29,7 +28,7 @@
     // Some stricter flags (disabled by default)
     "noUnusedLocals": false,
     "noUnusedParameters": false,
-    "noPropertyAccessFromIndexSignature": false
+    "noPropertyAccessFromIndexSignature": false,
   },
-  "include": ["index.ts", "src/**/*"]
+  "include": ["src/**/*.ts"]
 }

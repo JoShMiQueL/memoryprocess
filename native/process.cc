@@ -1,16 +1,21 @@
-#include <node.h>
 #include <windows.h>
 #include <TlHelp32.h>
 #include <vector>
 #include "process.h"
-#include "memoryjs.h"
+
+typedef struct {
+  int dwSize;
+  int th32ProcessID;
+  int cntThreads;
+  int th32ParentProcessID;
+  int pcPriClassBase;
+  char szExeFile[MAX_PATH];
+  uintptr_t handle;
+  uintptr_t modBaseAddr;
+} ProcessInfo;
 
 process::process() {}
 process::~process() {}
-
-using v8::Exception;
-using v8::Isolate;
-using v8::String;
 
 process::Pair process::openProcess(const char* processName, const char** errorMessage){
   PROCESSENTRY32 process;
