@@ -53,8 +53,11 @@ jobs:
       - name: Install dependencies
         run: npm install --ignore-scripts
 
+      - name: Configure node-gyp
+        run: node-gyp configure
+
       - name: Build
-        run: bun run build
+        run: node-gyp build
 
       # - name: Upload artifact
       #   uses: actions/upload-artifact@v4
