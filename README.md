@@ -30,5 +30,37 @@
   </a>
 </p>
 
+## Current Status
+
+This package is currently under active development. The following core functions are implemented and available for use:
+
+*   `openProcess(processIdentifier: string | number): ProcessInfo`: Opens a process by its name or ID.
+*   `closeProcess(handle: number): void`: Closes an opened process handle.
+*   `readMemory(handle: number, address: number, dataType: string): any`: Reads memory from a specific address in the target process.
+*   `writeMemory(handle: number, address: number, value: any, dataType: string): void`: Writes memory to a specific address in the target process.
+
+The `ProcessInfo` object returned by `openProcess` contains information about the opened process:
+
+```typescript
+interface ProcessInfo {
+  handle: number;      // Process handle
+  processId: number;   // Process ID (PID)
+  baseAddress: number; // Base address of the main module
+  size: number;        // Size of the main module
+  path: string;        // Full path to the process executable
+}
+```
+
+More functions are planned for future releases to expand the capabilities of this library.
+
+## Data Types
+
+The `dataType` parameter in `readMemory` and `writeMemory` specifies the type of data to be read or written. Currently, the following data type strings are supported (based on the C++ implementation):
+
+*   **Integers:** `int`, `int32`, `long`, `uint`, `uint32`, `ulong`, `dword` (all 4 bytes)
+*   **Shorts:** `short`, `int16`, `ushort`, `uint16`, `word` (all 2 bytes)
+*   **Chars/Bytes:** `char`, `int8`, `byte`, `uchar`, `uint8`, `ubyte` (all 1 byte)
+*   **Floating Point:** `float` (4 bytes), `double` (8 bytes)
+
 > [!NOTE]
-> W.I.P
+> Work is planned to define more specific TypeScript types for the `dataType` parameter and the `value` parameter in `writeMemory` to improve type safety and developer experience.

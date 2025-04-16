@@ -18,7 +18,7 @@ const { symbols } = dlopen(libPath, {
  * Reads memory from a process.
  * @param handle - The handle to the process.
  * @param address - The memory address to read from.
- * @param dataType - The data type to read.
+ * @param dataType - The data type to read. // TODO: Define specific types for dataType
  * @returns The read value.
  */
 export function readMemory(handle: number, address: number, dataType: string): number {
@@ -31,8 +31,8 @@ export function readMemory(handle: number, address: number, dataType: string): n
  * Writes memory to a process.
  * @param handle - The handle to the process.
  * @param address - The memory address to write to.
- * @param dataType - The data type to write.
- * @param value - The value to write.
+ * @param dataType - The data type to write. // TODO: Define specific types for dataType
+ * @param value - The value to write. // TODO: Define specific types for value based on dataType
  */
 export function writeMemory(handle: number, address: number, dataType: string, value: any): void {
   const dataTypeBuffer = Buffer.from(dataType + "\0")
