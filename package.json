@@ -1,6 +1,6 @@
 {
   "name": "memoryprocess",
-  "version": "3.7.0-beta.1",
+  "version": "1.0.0-beta.1",
   "description": "Maintained fork of memoryjs (Bun-only) with critical fixes. Requires Bun runtime.",
   "author": "JoShMiQueL",
   "type": "module",
