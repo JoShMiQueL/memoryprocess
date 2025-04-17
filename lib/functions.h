@@ -33,7 +33,7 @@ namespace functions {
   char readChar(HANDLE hProcess, DWORD64 address);
 
   template <class returnDataType>
-  Call call(HANDLE pHandle, std::vector<Arg> args, Type returnType, DWORD64 address, char** errorMessage) {
+  Call call(HANDLE pHandle, std::vector<Arg> args, Type returnType, DWORD64 address, const char** errorMessage) {
     std::vector<unsigned char> argShellcode;
 
     std::reverse(args.begin(), args.end());
@@ -61,9 +61,9 @@ namespace functions {
         LPVOID address = functions::reserveString(pHandle, value.c_str(), value.length());
 
         // Little endian representation
-        for (int i = 0; i < 4; i++) {
-          int shifted = ((int)address >> (i * 8)) & 0xFF;
-          argShellcode.push_back(shifted);
+        for (int i = 0; i < sizeof(LPVOID); i++) {
+          unsigned char byte = ((reinterpret_cast<uintptr_t>(address) >> (i * 8)) & 0xFF);
+          argShellcode.push_back(byte);
         }
 
         continue;
@@ -112,9 +112,9 @@ namespace functions {
         callShellcode.push_back(0xA3);
       }
 
-      for (int i = 0; i < 4; i++) {
-        int shifted = ((DWORD)returnValuePointer >> (i * 8)) & 0xFF;
-        callShellcode.push_back(shifted);
+      for (int i = 0; i < sizeof(LPVOID); i++) {
+        unsigned char byte = ((reinterpret_cast<uintptr_t>(returnValuePointer) >> (i * 8)) & 0xFF);
+        callShellcode.push_back(byte);
       }
     }
 
