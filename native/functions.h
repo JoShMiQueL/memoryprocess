@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <TlHelp32.h>
 #include <vector>
+#include <string>
 
 struct Call {
   int returnValue;
@@ -61,8 +62,8 @@ namespace functions {
         LPVOID address = functions::reserveString(pHandle, value.c_str(), value.length());
 
         // Little endian representation
-        for (int i = 0; i < 4; i++) {
-          int shifted = ((int)address >> (i * 8)) & 0xFF;
+        for (int i = 0; i < sizeof(void*); i++) {
+          unsigned char shifted = ((uintptr_t)address >> (i * 8)) & 0xFF;
           argShellcode.push_back(shifted);
         }
 
@@ -112,8 +113,8 @@ namespace functions {
         callShellcode.push_back(0xA3);
       }
 
-      for (int i = 0; i < 4; i++) {
-        int shifted = ((DWORD)returnValuePointer >> (i * 8)) & 0xFF;
+      for (int i = 0; i < sizeof(void*); i++) {
+        unsigned char shifted = ((uintptr_t)returnValuePointer >> (i * 8)) & 0xFF;
         callShellcode.push_back(shifted);
       }
     }

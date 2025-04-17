@@ -1,10 +1,7 @@
-#include <node.h>
 #include <windows.h>
 #include <TlHelp32.h>
 #include <vector>
 #include "module.h"
-#include "process.h"
-#include "memoryjs.h"
 
 DWORD64 module::getBaseAddress(const char* processName, DWORD processId) {
   const char* errorMessage = "";
