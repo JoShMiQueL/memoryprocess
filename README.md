@@ -36,20 +36,23 @@
 
 This package is currently under active development. The following core functions are implemented and available for use:
 
-*   `openProcess(processIdentifier: string | number): ProcessInfo`: Opens a process by its name or ID.
+*   `openProcess(processIdentifier: string | number): ProcessObject`: Opens a process by its name or ID.
 *   `closeProcess(handle: number): void`: Closes an opened process handle.
-*   `readMemory(handle: number, address: number, dataType: string): any`: Reads memory from a specific address in the target process.
-*   `writeMemory(handle: number, address: number, value: any, dataType: string): void`: Writes memory to a specific address in the target process.
+*   `readMemory(handle: number, address: number, dataType: MemoryDataType): number`: Reads memory from a specific address in the target process. **Note:** Currently returns `number` for all types, including strings (returning the address). String content reading is planned.
+*   `writeMemory(handle: number, address: number, value: MemoryValueType, dataType: MemoryDataType): void`: Writes memory to a specific address in the target process.
 
-The `ProcessInfo` object returned by `openProcess` contains information about the opened process:
+The `ProcessObject` object returned by `openProcess` contains information about the opened process:
 
 ```typescript
-interface ProcessInfo {
-  handle: number;      // Process handle
-  processId: number;   // Process ID (PID)
-  baseAddress: number; // Base address of the main module
-  size: number;        // Size of the main module
-  path: string;        // Full path to the process executable
+interface ProcessObject {
+  dwSize: number;              // Size of the structure, in bytes
+  th32ProcessID: number;       // Process identifier (PID)
+  cntThreads: number;          // Number of execution threads started by the process
+  th32ParentProcessID: number; // PID of the parent process
+  pcPriClassBase: number;      // Base priority of threads created by this process
+  szExeFile: string;           // Path to the executable file
+  handle: number;              // Process handle (for read/write operations)
+  modBaseAddr: number;         // Base address of the process's primary module
 }
 ```
 
