@@ -1,4 +1,4 @@
-> [!WARNING]
+> ⚠️ **WARNING:**
 > This package relies heavily on **Bun's native FFI (`bun:ffi`)** for performance and interacting with system APIs.
 >
 > Currently, Bun does not provide a polyfill for `bun:ffi` when building for Node.js (`target: 'node'`). Therefore, this package is **only compatible with the Bun runtime** and **will not work** if run directly with Node.js.
@@ -63,5 +63,5 @@ The `dataType` parameter in `readMemory` and `writeMemory` specifies the type of
 *   **Chars/Bytes:** `char`, `int8`, `byte`, `uchar`, `uint8`, `ubyte` (all 1 byte)
 *   **Floating Point:** `float` (4 bytes), `double` (8 bytes)
 
-> [!NOTE]
+> 📝 **Note**
 > Work is planned to define more specific TypeScript types for the `dataType` parameter and the `value` parameter in `writeMemory` to improve type safety and developer experience.
