@@ -1,10 +1,11 @@
 > ⚠️ **WARNING:**
 > This package relies heavily on **Bun's native FFI (`bun:ffi`)** for performance and interacting with system APIs.
->
+> Furthermore, it interacts directly with the Windows API and is therefore **only compatible with Windows**.
+> 
 > Currently, Bun does not provide a polyfill for `bun:ffi` when building for Node.js (`target: 'node'`). Therefore, this package is **only compatible with the Bun runtime** and **will not work** if run directly with Node.js.
->
+> 
 > While Bun intends to add polyfills for `bun:*` modules in the future to improve Node.js compatibility for bundled code (see [Bundler Docs](https://bun.sh/docs/bundler#target)), this is not yet implemented for `bun:ffi`.
->
+> 
 > **Requirements:**
 > *   Bun v1.2.9 or later (required to run the code)
 
