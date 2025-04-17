@@ -22,12 +22,20 @@
   },
   "devDependencies": {
     "@biomejs/biome": "1.9.4",
+    "@commitlint/cli": "19.8.0",
+    "@commitlint/config-conventional": "19.8.0",
     "@microsoft/api-extractor": "7.52.3",
+    "@semantic-release/commit-analyzer": "13.0.1",
+    "@semantic-release/git": "10.0.1",
+    "@semantic-release/github": "11.0.1",
+    "@semantic-release/npm": "12.0.1",
+    "@semantic-release/release-notes-generator": "14.0.3",
     "@types/bun": "latest",
-    "lefthook": "1.11.10"
+    "lefthook": "1.11.10",
+    "semantic-release": "24.2.3"
   },
   "peerDependencies": {
-    "typescript": "^5.8.3"
+    "typescript": "5.8.3"
   },
   "trustedDependencies": [
     "@biomejs/biome",
