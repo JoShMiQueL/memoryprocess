@@ -56,12 +56,18 @@ More functions are planned for future releases to expand the capabilities of thi
 
 ## Data Types
 
-The `dataType` parameter in `readMemory` and `writeMemory` specifies the type of data to be read or written. Currently, the following data type strings are supported (based on the C++ implementation):
+The `dataType` parameter in `readMemory` and `writeMemory` specifies the type of data to be read or written. It accepts a specific set of string literals defined by the `MemoryDataType` type in TypeScript. The `value` parameter for `writeMemory` should correspond to this type, as defined by `MemoryValueType` (number, string, or boolean).
 
-*   **Integers:** `int`, `int32`, `long`, `uint`, `uint32`, `ulong`, `dword` (all 4 bytes)
-*   **Shorts:** `short`, `int16`, `ushort`, `uint16`, `word` (all 2 bytes)
-*   **Chars/Bytes:** `char`, `int8`, `byte`, `uchar`, `uint8`, `ubyte` (all 1 byte)
+The following data type strings (and their aliases) are supported:
+
+*   **8-bit Signed:** `byte`, `int8`, `char`
+*   **8-bit Unsigned:** `ubyte`, `uint8`, `uchar`
+*   **16-bit Signed:** `short`, `int16`
+*   **16-bit Unsigned:** `ushort`, `uint16`, `word`
+*   **32-bit Signed:** `int`, `int32`, `long`
+*   **32-bit Unsigned:** `uint`, `uint32`, `ulong`, `dword`
+*   **64-bit Signed:** `longlong`, `int64` (uses BigInt)
+*   **64-bit Unsigned:** `ulonglong`, `uint64` (uses BigInt)
 *   **Floating Point:** `float` (4 bytes), `double` (8 bytes)
-
-> 📝 **Note**
-> Work is planned to define more specific TypeScript types for the `dataType` parameter and the `value` parameter in `writeMemory` to improve type safety and developer experience.
+*   **Boolean:** `bool` (1 byte, 0 or 1)
+*   **String:** `string`, `str` (Null-terminated UTF-8)
