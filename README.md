@@ -62,6 +62,8 @@ More functions are planned for future releases to expand the capabilities of thi
 
 The `dataType` parameter in `readMemory` and `writeMemory` specifies the type of data to be read or written. It accepts a specific set of string literals defined by the `MemoryDataType` type in TypeScript. The `value` parameter for `writeMemory` should correspond to this type, as defined by `MemoryValueType` (number, string, or boolean).
 
+### Supported Data Type Strings
+
 The following data type strings (and their aliases) are supported:
 
 *   **8-bit Signed:** `byte`, `int8`, `char`
@@ -75,3 +77,24 @@ The following data type strings (and their aliases) are supported:
 *   **Floating Point:** `float` (4 bytes), `double` (8 bytes)
 *   **Boolean:** `bool` (1 byte, 0 or 1)
 *   **String:** `string`, `str` (Null-terminated UTF-8)
+
+### TypeScript Type Definitions
+
+```typescript
+/** Represents the valid data types for memory operations. */
+export type MemoryDataType = 
+  | "byte" | "int8" | "char" // 8-bit signed
+  | "ubyte" | "uint8" | "uchar" // 8-bit unsigned
+  | "short" | "int16" // 16-bit signed
+  | "ushort" | "uint16" | "word" // 16-bit unsigned
+  | "int" | "int32" | "long" // 32-bit signed
+  | "uint" | "uint32" | "ulong" | "dword" // 32-bit unsigned
+  | "float" // 32-bit float
+  | "double" // 64-bit float
+  | "longlong" | "int64" // 64-bit signed (Note: JS Number limitations apply)
+  | "ulonglong" | "uint64" // 64-bit unsigned (Note: JS Number limitations apply)
+  | "bool"
+  | "string" | "str"; // Null-terminated string
+
+/** Represents the possible value types corresponding to MemoryDataType. */
+export type MemoryValueType = number | string | boolean;
