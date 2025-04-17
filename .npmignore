@@ -1,17 +1,12 @@
-.github
-/native/
-node_modules
-/src/
-/test/
-.eslintrc.js
-.gitattributes
-.gitignore
-.npmignore
-binding.gyp
-build.ts
-bun.lock
-tsconfig.json
-/config/
-bunfig.toml
-index.ts
-release_body.md
+# Ignore everything by default
+*
+
+# Keep the lib directory and its contents
+!lib/
+!lib/**
+
+# Keep essential files
+!package.json
+!README.md
+!LICENSE
+!CHANGELOG.md
