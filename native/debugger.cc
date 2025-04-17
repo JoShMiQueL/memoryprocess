@@ -4,7 +4,6 @@
  * https://github.com/ReClassNET/ReClass.NET
  */
 
-#include <node.h>
 #include <windows.h>
 #include <TlHelp32.h>
 #include <vector>

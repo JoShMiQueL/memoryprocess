@@ -1,18 +1,54 @@
 {
-  "name": "@joshmiquel/memoryjs",
-  "version": "3.6.1",
-  "description": "Maintained fork of memoryjs with critical fixes. Includes /Zc:strictStrings compiler fixes and other improvements. Original package by Rob--",
+  "name": "memoryprocess",
+  "version": "0.1.0-beta.0",
+  "description": "Maintained fork of memoryjs (Bun-only) with critical fixes. Requires Bun runtime.",
+  "author": "JoShMiQueL",
   "type": "module",
-  "main": "lib/index.js",
-  "types": "lib/index.d.ts",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "bun run build.ts",
-    "check": "biome check --write "
+  "types": "./lib/index.d.ts",
+  "engineStrict": true,
+  "engines": {
+    "bun": ">=1.2.9"
   },
+  "exports": {
+    ".": {
+      "bun": "./lib/index.js",
+      "node": "./lib/node-error.js",
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "scripts": {
+    "check": "biome check --write"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "1.9.4",
+    "@commitlint/cli": "19.8.0",
+    "@commitlint/config-conventional": "19.8.0",
+    "@microsoft/api-extractor": "7.52.3",
+    "@semantic-release/commit-analyzer": "13.0.1",
+    "@semantic-release/git": "10.0.1",
+    "@semantic-release/github": "11.0.1",
+    "@semantic-release/npm": "12.0.1",
+    "@semantic-release/release-notes-generator": "14.0.3",
+    "@types/bun": "latest",
+    "lefthook": "1.11.10",
+    "semantic-release": "24.2.3"
+  },
+  "peerDependencies": {
+    "typescript": "5.8.3"
+  },
+  "trustedDependencies": [
+    "@biomejs/biome",
+    "lefthook"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/JoShMiQueL/memoryprocess#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/JoShMiQueL/memoryjs.git"
+    "url": "git+https://github.com/JoShMiQueL/memoryprocess.git"
+  },
+  "bugs": {
+    "url": "https://github.com/JoShMiQueL/memoryprocess/issues"
   },
   "keywords": [
     "memory",
@@ -23,33 +59,5 @@
     "maintained-fork",
     "windows-memory",
     "process-memory"
-  ],
-  "author": "JoShMiQueL",
-  "contributors": [
-    {
-      "name": "Rob--",
-      "url": "https://github.com/Rob--"
-    }
-  ],
-  "license": "MIT",
-  "bugs": {
-    "url": "https://github.com/JoShMiQueL/memoryjs/issues"
-  },
-  "homepage": "https://github.com/JoShMiQueL/memoryjs#readme",
-  "dependencies": {
-    "node-addon-api": "8.3.1"
-  },
-  "devDependencies": {
-    "@biomejs/biome": "1.9.4",
-    "@microsoft/api-extractor": "7.52.3",
-    "@types/bun": "latest",
-    "lefthook": "1.11.10"
-  },
-  "peerDependencies": {
-    "typescript": "^5"
-  },
-  "trustedDependencies": [
-    "@biomejs/biome",
-    "lefthook"
   ]
 }
