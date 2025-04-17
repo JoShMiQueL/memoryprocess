@@ -14,14 +14,32 @@ const { symbols } = dlopen(libPath, {
   },
 })
 
+/** Represents the valid data types for memory operations. */
+export type MemoryDataType = 
+  | "byte" | "int8" | "char" // 8-bit signed
+  | "ubyte" | "uint8" | "uchar" // 8-bit unsigned
+  | "short" | "int16" // 16-bit signed
+  | "ushort" | "uint16" | "word" // 16-bit unsigned
+  | "int" | "int32" | "long" // 32-bit signed
+  | "uint" | "uint32" | "ulong" | "dword" // 32-bit unsigned
+  | "float" // 32-bit float
+  | "double" // 64-bit float
+  | "longlong" | "int64" // 64-bit signed (Note: JS Number limitations apply)
+  | "ulonglong" | "uint64" // 64-bit unsigned (Note: JS Number limitations apply)
+  | "bool"
+  | "string" | "str"; // Null-terminated string
+
+/** Represents the possible value types corresponding to MemoryDataType. */
+export type MemoryValueType = number | string | boolean;
+
 /**
  * Reads memory from a process.
  * @param handle - The handle to the process.
- * @param address - The memory address to read from.
- * @param dataType - The data type to read. // TODO: Define specific types for dataType
- * @returns The read value.
+ * @param address - The address to read from.
+ * @param dataType - The data type to read.
+ * @returns The value read from memory.
  */
-export function readMemory(handle: number, address: number, dataType: string): number {
+export function readMemory(handle: number, address: number, dataType: MemoryDataType): number {
   const dataTypeBuffer = Buffer.from(dataType + "\0")
   const result = symbols.readMemory(handle, address, dataTypeBuffer)
   return result
@@ -30,11 +48,16 @@ export function readMemory(handle: number, address: number, dataType: string): n
 /**
  * Writes memory to a process.
  * @param handle - The handle to the process.
- * @param address - The memory address to write to.
- * @param dataType - The data type to write. // TODO: Define specific types for dataType
- * @param value - The value to write. // TODO: Define specific types for value based on dataType
+ * @param address - The address to write to.
+ * @param dataType - The data type to write.
+ * @param value - The value to write. Should be `number` for numeric types, `boolean` for bool, and `string` for string.
  */
-export function writeMemory(handle: number, address: number, dataType: string, value: any): void {
+export function writeMemory(
+  handle: number,
+  address: number,
+  dataType: MemoryDataType,
+  value: MemoryValueType,
+): void {
   const dataTypeBuffer = Buffer.from(dataType + "\0")
   
   let valueBuffer: Buffer;
@@ -53,10 +76,10 @@ export function writeMemory(handle: number, address: number, dataType: string, v
   } else if (dataType === "ushort" || dataType === "uint16" || dataType === "word") {
       valueBuffer = Buffer.alloc(2);
       valueBuffer.writeUInt16LE(value as number, 0);
-  } else if (dataType === "char" || dataType === "int8" || dataType === "byte") {
+  } else if (dataType === "byte" || dataType === "int8" || dataType === "char") {
       valueBuffer = Buffer.alloc(1);
       valueBuffer.writeInt8(value as number, 0);
-  } else if (dataType === "uchar" || dataType === "uint8" || dataType === "ubyte") {
+  } else if (dataType === "ubyte" || dataType === "uint8" || dataType === "uchar") {
       valueBuffer = Buffer.alloc(1);
       valueBuffer.writeUInt8(value as number, 0);
   } else if (dataType === "float") {
@@ -65,18 +88,18 @@ export function writeMemory(handle: number, address: number, dataType: string, v
   } else if (dataType === "double") {
       valueBuffer = Buffer.alloc(8);
       valueBuffer.writeDoubleLE(value as number, 0);
-  } else if (dataType === "int64") {
+  } else if (dataType === "longlong" || dataType === "int64") {
       valueBuffer = Buffer.alloc(8);
       valueBuffer.writeBigInt64LE(BigInt(value), 0);
-  } else if (dataType === "uint64") {
+  } else if (dataType === "ulonglong" || dataType === "uint64") {
        valueBuffer = Buffer.alloc(8);
        valueBuffer.writeBigUInt64LE(BigInt(value), 0);
+  } else if (dataType === "bool") {
+      valueBuffer = Buffer.alloc(1);
+      valueBuffer.writeUInt8(value ? 1 : 0, 0);
   } else if (dataType === "string" || dataType === "str") {
       // Ensure null termination for C++ side
       valueBuffer = Buffer.from((value as string) + "\0", "utf8");
-  } else if (dataType === "bool" || dataType === "boolean") {
-      valueBuffer = Buffer.alloc(1);
-      valueBuffer.writeUInt8(value ? 1 : 0, 0);
   } else if (dataType === "ptr" || dataType === "pointer") {
       valueBuffer = Buffer.alloc(8); // Assuming 64-bit pointers
       valueBuffer.writeBigUInt64LE(BigInt(value), 0);
