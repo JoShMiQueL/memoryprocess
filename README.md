@@ -11,7 +11,8 @@
 ---
 
 <p align="center">
-  <img alt="Banner"  src="assets/banner.png">
+  <img alt="Banner" src="assets/banner.png">
+  <br>
   <code>MemoryProcess</code> is an NPM package to read and write process memory
   <br>
   This is a fork of the original <a href="https://github.com/Rob--/memoryjs">memoryjs</a> package, maintained by <a href="https://github.com/JoShMiQueL">JoShMiQueL</a>
