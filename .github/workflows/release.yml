@@ -29,7 +29,7 @@ jobs:
           bun-version: latest
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile --ignore-scripts --no-save
+        run: bun install --ignore-scripts --no-save
 
       - name: Install node-gyp
         run: bun add -g node-gyp
