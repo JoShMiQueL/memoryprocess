@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <TlHelp32.h>
 #include <vector>
+#include <string>
 
 struct Call {
   int returnValue;

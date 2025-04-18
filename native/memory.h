@@ -5,6 +5,8 @@
 
 #include <windows.h>
 #include <TlHelp32.h>
+#include <vector>
+#include <string>
 
 class memory {
 public:
@@ -19,8 +21,8 @@ public:
     return cRead;
   }
 
-  BOOL readBuffer(HANDLE hProcess, DWORD64 address, SIZE_T size, char* dstBuffer) {
-    return ReadProcessMemory(hProcess, (LPVOID)address, dstBuffer, size, NULL);
+  BOOL readBuffer(HANDLE hProcess, DWORD64 address, SIZE_T size, const char* dstBuffer) {
+    return ReadProcessMemory(hProcess, (LPVOID)address, (LPVOID)dstBuffer, size, NULL);
   }
 
   char readChar(HANDLE hProcess, DWORD64 address) {
@@ -70,11 +72,13 @@ public:
 
   template <class dataType>
   void writeMemory(HANDLE hProcess, DWORD64 address, dataType value, SIZE_T size) {
-	  LPVOID buffer = value;
+	  void* buffer;
 
-	  if (typeid(dataType) != typeid(char*)) {
-		  buffer = &value;
-	  }
+	  if (std::is_pointer<dataType>::value) {
+      buffer = (void*)value;
+    } else {
+      buffer = &value; 
+    }
 
 	  WriteProcessMemory(hProcess, (LPVOID)address, buffer, size, NULL);
   }

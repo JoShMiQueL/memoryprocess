@@ -1,7 +1,7 @@
 {
   "name": "memoryprocess",
-  "version": "3.5.1",
-  "description": "Node add-on for memory reading and writing!",
+  "version": "1.0.0-beta",
+  "description": "Maintained fork of memoryjs with critical fixes.",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "type": "module",

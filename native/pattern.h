@@ -5,6 +5,7 @@
 
 #include <windows.h>
 #include <TlHelp32.h>
+#include <vector>
 
 class pattern {
 public:
