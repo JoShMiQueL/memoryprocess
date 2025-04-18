@@ -27,7 +27,7 @@
   },
   "homepage": "https://github.com/joshmiquel/memoryprocess#readme",
   "dependencies": {
-    "node-addon-api": "3.2.1"
+    "node-addon-api": "8.3.1"
   },
   "devDependencies": {
     "@biomejs/biome": "1.9.4",
@@ -38,7 +38,7 @@
     "@types/bun": "1.2.10",
     "@types/node": "22.14.1",
     "lefthook": "1.11.10",
-    "typescript": "5"
+    "typescript": "5.8.3"
   },
   "trustedDependencies": [
     "@biomejs/biome",

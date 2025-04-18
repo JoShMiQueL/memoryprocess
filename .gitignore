@@ -4,6 +4,7 @@ build
 .vscode
 .vs
 .windsurfrules
+bun.lock*
 
 # Logs
 *.log
