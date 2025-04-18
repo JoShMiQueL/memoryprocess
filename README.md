@@ -1,16 +1,3 @@
-> ⚠️ **WARNING:**
-> This package relies heavily on **Bun's native FFI (`bun:ffi`)** for performance and interacting with system APIs.
-> Furthermore, it interacts directly with the Windows API and is therefore **only compatible with Windows**.
-> 
-> Currently, Bun does not provide a polyfill for `bun:ffi` when building for Node.js (`target: 'node'`). Therefore, this package is **only compatible with the Bun runtime** and **will not work** if run directly with Node.js.
-> 
-> While Bun intends to add polyfills for `bun:*` modules in the future to improve Node.js compatibility for bundled code (see [Bundler Docs](https://bun.sh/docs/bundler#target)), this is not yet implemented for `bun:ffi`.
-> 
-> **Requirements:**
-> *   Bun v1.2.9 or later (required to run the code)
-
----
-
 <p align="center">
   <img alt="Banner" src="assets/banner.png">
   <br>
@@ -32,69 +19,65 @@
   </a>
 </p>
 
-## Current Status
+---
 
-This package is currently under active development. The following core functions are implemented and available for use:
+## 📖 API References (`src`)
 
-*   `openProcess(processIdentifier: string | number): ProcessObject`: Opens a process by its name or ID.
-*   `closeProcess(handle: number): void`: Closes an opened process handle.
-*   `readMemory(handle: number, address: number, dataType: MemoryDataType): number`: Reads memory from a specific address in the target process. **Note:** Currently returns `number` for all types, including strings (returning the address). String content reading is planned.
-*   `writeMemory(handle: number, address: number, value: MemoryValueType, dataType: MemoryDataType): void`: Writes memory to a specific address in the target process.
+### Main Functions
 
-The `ProcessObject` object returned by `openProcess` contains information about the opened process:
+- **openProcess(processIdentifier: string | number, callback?): Process**  
+  Opens a process by name or ID. Returns the process handle or undefined if not found.
 
-```typescript
-interface ProcessObject {
-  dwSize: number;              // Size of the structure, in bytes
-  th32ProcessID: number;       // Process identifier (PID)
-  cntThreads: number;          // Number of execution threads started by the process
-  th32ParentProcessID: number; // PID of the parent process
-  pcPriClassBase: number;      // Base priority of threads created by this process
-  szExeFile: string;           // Path to the executable file
-  handle: number;              // Process handle (for read/write operations)
-  modBaseAddr: number;         // Base address of the process's primary module
-}
-```
+- **closeHandle(handle: number): boolean**  
+  Closes a process handle.
 
-More functions are planned for future releases to expand the capabilities of this library.
+- **getProcesses(callback?): Process[]**  
+  Returns the list of running processes.
 
-## Data Types
+- **findModule(moduleName: string, processId: number, callback?): Module | undefined**  
+  Finds a module by name in a process.
 
-The `dataType` parameter in `readMemory` and `writeMemory` specifies the type of data to be read or written. It accepts a specific set of string literals defined by the `MemoryDataType` type in TypeScript. The `value` parameter for `writeMemory` should correspond to this type, as defined by `MemoryValueType` (number, string, or boolean).
+- **getModules(processId: number, callback?): Module[]**  
+  Returns the modules loaded by a process.
 
-### Supported Data Type Strings
+- **readMemory<T extends DataType>(handle: number, address: number, dataType: T, callback?): MemoryData<T> | undefined**  
+  Reads a value from a process's memory.
 
-The following data type strings (and their aliases) are supported:
+- **writeMemory(handle: number, address: number, value: any, dataType: DataType): boolean**  
+  Writes a value to a process's memory.
 
-*   **8-bit Signed:** `byte`, `int8`, `char`
-*   **8-bit Unsigned:** `ubyte`, `uint8`, `uchar`
-*   **16-bit Signed:** `short`, `int16`
-*   **16-bit Unsigned:** `ushort`, `uint16`, `word`
-*   **32-bit Signed:** `int`, `int32`, `long`
-*   **32-bit Unsigned:** `uint`, `uint32`, `ulong`, `dword`
-*   **64-bit Signed:** `longlong`, `int64` (uses BigInt)
-*   **64-bit Unsigned:** `ulonglong`, `uint64` (uses BigInt)
-*   **Floating Point:** `float` (4 bytes), `double` (8 bytes)
-*   **Boolean:** `bool` (1 byte, 0 or 1)
-*   **String:** `string`, `str` (Null-terminated UTF-8)
+- **findPattern(...)**  
+  Scans memory patterns (multiple overloads).
 
-### TypeScript Type Definitions
+- **callFunction(handle: number, args: any[], returnType: number, address: number, callback?): any**  
+  Calls a function in the process's memory.
 
-```typescript
-/** Represents the valid data types for memory operations. */
-export type MemoryDataType = 
-  | "byte" | "int8" | "char" // 8-bit signed
-  | "ubyte" | "uint8" | "uchar" // 8-bit unsigned
-  | "short" | "int16" // 16-bit signed
-  | "ushort" | "uint16" | "word" // 16-bit unsigned
-  | "int" | "int32" | "long" // 32-bit signed
-  | "uint" | "uint32" | "ulong" | "dword" // 32-bit unsigned
-  | "float" // 32-bit float
-  | "double" // 64-bit float
-  | "longlong" | "int64" // 64-bit signed (Note: JS Number limitations apply)
-  | "ulonglong" | "uint64" // 64-bit unsigned (Note: JS Number limitations apply)
-  | "bool"
-  | "string" | "str"; // Null-terminated string
+- **Debugger**  
+  Utility class for process debugging. Main methods: `attach`, `detach`, `setHardwareBreakpoint`, `removeHardwareBreakpoint`, `monitor`.
 
-/** Represents the possible value types corresponding to MemoryDataType. */
-export type MemoryValueType = number | string | boolean;
+- **virtualAllocEx, virtualProtectEx, getRegions, virtualQueryEx, injectDll, unloadDll, openFileMapping, mapViewOfFile**  
+  Advanced memory and DLL manipulation functions.
+
+### Main Types and Constants (`types.ts`)
+
+- **type DataType**  
+  Supported data types for memory read/write: `'byte'`, `'int32'`, `'float'`, `'string'`, `'vector3'`, etc.
+
+- **type MemoryData<T extends DataType>**  
+  Maps a `DataType` to its corresponding JS type (`number`, `bigint`, `string`, `{x,y,z}`...)
+
+- **interface Process**  
+  Information about an opened process (PID, handle, etc).
+
+- **interface Module**  
+  Information about a module loaded in a process.
+
+- **type Protection, PageProtection, AllocationType, BreakpointTriggerType**  
+  Auxiliary types for memory flags and protection.
+
+- **const FunctionTypes, SignatureTypes, MemoryAccessFlags, MemoryPageFlags, HardwareDebugRegisters, BreakpointTriggerTypes**  
+  Constants for flags and function types.
+
+---
+
+> See the [`src`](./src) folder for full details and comments on each function/type.

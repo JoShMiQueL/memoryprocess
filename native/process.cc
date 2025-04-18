@@ -2,9 +2,14 @@
 #include <TlHelp32.h>
 #include <vector>
 #include "process.h"
+#include "memoryprocess.h"
 
 process::process() {}
 process::~process() {}
+
+using v8::Exception;
+using v8::Isolate;
+using v8::String;
 
 process::Pair process::openProcess(const char* processName, const char** errorMessage){
   PROCESSENTRY32 process;
@@ -56,10 +61,6 @@ process::Pair process::openProcess(DWORD processId, const char** errorMessage) {
     handle,
     process,
   };
-}
-
-void process::closeProcess(HANDLE hProcess){
-  CloseHandle(hProcess);
 }
 
 std::vector<PROCESSENTRY32> process::getProcesses(const char** errorMessage) {

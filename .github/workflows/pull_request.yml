@@ -2,7 +2,7 @@ name: reviewdog
 on: [pull_request]
 jobs:
   biome:
-    name: runner / Biome
+    name: Biome Linter
     runs-on: ubuntu-latest
     permissions:
       contents: read

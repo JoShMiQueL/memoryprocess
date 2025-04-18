@@ -1,4 +1,5 @@
-import { openProcess, closeProcess, readMemory } from '../lib';
+// @ts-ignore
+import { openProcess, closeProcess, readMemory } from 'memoryprocess';
 
 const PROCESS_NAME = "DarkSoulsRemastered.exe";
 

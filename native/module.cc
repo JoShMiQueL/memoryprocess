@@ -2,6 +2,8 @@
 #include <TlHelp32.h>
 #include <vector>
 #include "module.h"
+#include "process.h"
+#include "memoryprocess.h"
 
 DWORD64 module::getBaseAddress(const char* processName, DWORD processId) {
   const char* errorMessage = "";

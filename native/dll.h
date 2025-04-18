@@ -8,7 +8,7 @@
 #include <string>
 
 namespace dll {
-  inline bool inject(HANDLE handle, std::string dllPath, const char** errorMessage, LPDWORD moduleHandle) {
+  bool inject(HANDLE handle, std::string dllPath, const char** errorMessage, LPDWORD moduleHandle) {
     // allocate space in target process memory for DLL path
     LPVOID targetProcessPath = VirtualAllocEx(handle, NULL, dllPath.length() + 1, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
 
@@ -52,7 +52,7 @@ namespace dll {
     return *moduleHandle > 0;
   }
 
-  inline bool unload(HANDLE handle, const char** errorMessage, HMODULE moduleHandle) {
+  bool unload(HANDLE handle, const char** errorMessage, HMODULE moduleHandle) {
     HMODULE kernel32 = LoadLibrary("kernel32");
 
     if (kernel32 == 0) {

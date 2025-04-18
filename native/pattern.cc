@@ -2,6 +2,9 @@
 #include <TlHelp32.h>
 #include <vector>
 #include "pattern.h"
+#include "memoryprocess.h"
+#include "process.h"
+#include "memory.h"
 
 #define INRANGE(x,a,b) (x >= a && x <= b) 
 #define getBits( x ) (INRANGE(x,'0','9') ? (x - '0') : ((x&(~0x20)) - 'A' + 0xa))

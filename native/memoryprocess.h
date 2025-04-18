@@ -8,7 +8,7 @@
 class memoryprocess {
 
 public:
-memoryprocess();
+  memoryprocess();
   ~memoryprocess();
 };
 #endif

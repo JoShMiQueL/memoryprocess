@@ -62,9 +62,9 @@ namespace functions {
         LPVOID address = functions::reserveString(pHandle, value.c_str(), value.length());
 
         // Little endian representation
-        for (int i = 0; i < sizeof(void*); i++) {
-          unsigned char shifted = ((uintptr_t)address >> (i * 8)) & 0xFF;
-          argShellcode.push_back(shifted);
+        for (int i = 0; i < sizeof(LPVOID); i++) {
+          unsigned char byte = ((reinterpret_cast<uintptr_t>(address) >> (i * 8)) & 0xFF);
+          argShellcode.push_back(byte);
         }
 
         continue;
@@ -113,9 +113,9 @@ namespace functions {
         callShellcode.push_back(0xA3);
       }
 
-      for (int i = 0; i < sizeof(void*); i++) {
-        unsigned char shifted = ((uintptr_t)returnValuePointer >> (i * 8)) & 0xFF;
-        callShellcode.push_back(shifted);
+      for (int i = 0; i < sizeof(LPVOID); i++) {
+        unsigned char byte = ((reinterpret_cast<uintptr_t>(returnValuePointer) >> (i * 8)) & 0xFF);
+        callShellcode.push_back(byte);
       }
     }
 
