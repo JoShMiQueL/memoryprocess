@@ -1,10 +1,20 @@
-build
-test.js
-npm-debug.log
-.vscode
-.vs
-node_modules
-test/vcxproj/Debug
-test/vcxproj/Release
-test/*.exe
-test/.vs
+# Ignore everything by default
+*
+
+# Keep the lib directory and its contents
+!lib/
+!lib/**
+
+# Keep the assets directory and its contents
+!assets/
+!assets/**
+
+# Keep essential files
+!package.json
+!README.md
+!LICENSE
+!CHANGELOG.md
+
+# Keep the lock files
+!package-lock.json
+!bun.lockb

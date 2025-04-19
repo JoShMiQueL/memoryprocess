@@ -1,18 +1,18 @@
 {
   "targets": [
     {
-      "target_name": "memoryjs",
+      "target_name": "native",
       "include_dirs" : [
         "<!@(node -p \"require('node-addon-api').include\")"
       ],
       "sources": [
-        "lib/memoryjs.cc",
-        "lib/memory.cc",
-        "lib/process.cc",
-        "lib/module.cc",
-        "lib/pattern.cc",
-        "lib/functions.cc",
-        "lib/debugger.cc"
+        "native/memoryprocess.cc",
+        "native/memory.cc",
+        "native/process.cc",
+        "native/module.cc",
+        "native/pattern.cc",
+        "native/functions.cc",
+        "native/debugger.cc"
       ],
       'defines': [ 'NAPI_DISABLE_CPP_EXCEPTIONS' ]
     }

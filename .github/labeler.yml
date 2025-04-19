@@ -1,0 +1,44 @@
+typescript:
+  - changed-files:
+      any-glob-to-any-file: ['**/*.ts']
+
+native:
+  - changed-files:
+      any-glob-to-any-file: ['native/**/*']
+
+documentation:
+  - changed-files:
+      any-glob-to-any-file: ['README.md', 'docs/**/*']
+
+tests:
+  - changed-files:
+      any-glob-to-any-file: ['test/**/*']
+
+examples:
+  - changed-files:
+      any-glob-to-any-file: ['examples/**/*']
+
+build:
+  - changed-files:
+      any-glob-to-any-file: ['build.ts', 'tsconfig.json']
+
+dependencies:
+  - changed-files:
+      any-glob-to-any-file: ['package.json', 'bun.lock']
+
+config:
+  - changed-files:
+      any-glob-to-any-file: [
+        'config/**/*',
+        '.gitignore',
+        '.npmignore',
+        '.gitattributes',
+        'lefthook.yml',
+        'biome.json',
+        '.github/*',
+        '.github/!(workflows)/**/*'
+      ]
+
+ci:
+  - changed-files:
+      any-glob-to-any-file: ['.github/workflows/**/*']
