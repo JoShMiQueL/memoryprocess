@@ -101,7 +101,7 @@ try {
     entrypoints: entryFiles,
     outdir: "lib",
     minify: true,
-    target: "node",
+    target: "node"
   });
 
   if (!buildResult.success) {

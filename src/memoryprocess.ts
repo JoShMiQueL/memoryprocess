@@ -1,5 +1,5 @@
 // @ts-ignore
-import memoryprocess from './native.node';
+const memoryprocess = require('./native.node');
 import { existsSync, type PathLike } from 'fs';
 import { MemoryAllocationFlags, type Protection, MemoryAccessFlags, MemoryPageFlags, type Process, type Module, type DataType, type MemoryData } from "./types"
 import Debugger from './debugger';
