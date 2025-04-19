@@ -1,52 +1,50 @@
 {
-  "name": "@joshmiquel/memoryjs",
-  "version": "3.6.1",
-  "description": "Maintained fork of memoryjs with critical fixes. Includes /Zc:strictStrings compiler fixes and other improvements. Original package by Rob--",
-  "type": "module",
+  "name": "memoryprocess",
+  "version": "1.0.0-beta.2",
+  "description": "Maintained fork of memoryjs with critical fixes.",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
+  "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "bun run build.ts",
-    "check": "biome check --write "
+    "build": "bun run scripts/build.ts",
+    "check": "biome check --write"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/JoShMiQueL/memoryjs.git"
+    "url": "git+https://github.com/joshmiquel/memoryprocess.git"
   },
   "keywords": [
     "memory",
     "reading",
     "writing",
     "management",
-    "addon",
-    "maintained-fork",
-    "windows-memory",
-    "process-memory"
+    "addon"
   ],
   "author": "JoShMiQueL",
-  "contributors": [
-    {
-      "name": "Rob--",
-      "url": "https://github.com/Rob--"
-    }
-  ],
   "license": "MIT",
+  "packageManager": "bun@1.2.10",
   "bugs": {
-    "url": "https://github.com/JoShMiQueL/memoryjs/issues"
+    "url": "https://github.com/joshmiquel/memoryprocess/issues"
   },
-  "homepage": "https://github.com/JoShMiQueL/memoryjs#readme",
+  "homepage": "https://github.com/joshmiquel/memoryprocess#readme",
   "dependencies": {
     "node-addon-api": "8.3.1"
   },
   "devDependencies": {
     "@biomejs/biome": "1.9.4",
-    "@microsoft/api-extractor": "7.52.3",
-    "@types/bun": "latest",
-    "lefthook": "1.11.10"
-  },
-  "peerDependencies": {
-    "typescript": "^5"
+    "@commitlint/cli": "19.8.0",
+    "@commitlint/config-conventional": "19.8.0",
+    "@microsoft/api-extractor": "7.52.4",
+    "@semantic-release/commit-analyzer": "^13.0.1",
+    "@semantic-release/git": "^10.0.1",
+    "@semantic-release/github": "^11.0.1",
+    "@semantic-release/npm": "^12.0.1",
+    "@semantic-release/release-notes-generator": "^14.0.3",
+    "@total-typescript/tsconfig": "1.0.4",
+    "@types/bun": "1.2.10",
+    "@types/node": "22.14.1",
+    "lefthook": "1.11.10",
+    "typescript": "5.8.3"
   },
   "trustedDependencies": [
     "@biomejs/biome",

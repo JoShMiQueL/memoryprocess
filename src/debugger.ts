@@ -1,14 +1,8 @@
-import { EventEmitter } from "node:events";
-import type { MemoryJS } from "./types";
-
-interface Interval {
-  register: number;
-  id: NodeJS.Timeout;
-}
+// @ts-nocheck
+// TODO: In the future, we plan to add proper typing
+import EventEmitter from 'events';
 
 const lengths = {
-  str: 0,
-  string: 0,
   byte: 1,
   int: 4,
   int32: 4,
@@ -33,17 +27,7 @@ const lengths = {
 };
 
 // Tracks used and unused registers
-interface RegisterMap {
-  DR0: number;
-  DR1: number;
-  DR2: number;
-  DR3: number;
-}
-
 class Registers {
-  private registers: RegisterMap;
-  private used: number[];
-
   constructor() {
     this.registers = Object.freeze({
       DR0: 0x0,
@@ -56,37 +40,33 @@ class Registers {
   }
 
   getRegister() {
-    const unused = Object.values(this.registers).filter(
-      (r) => !this.used.includes(r),
-    );
+    const unused = Object
+      .values(this.registers)
+      .filter(r => !this.used.includes(r));
 
     return unused[0];
   }
 
-  busy(register: number) {
+  busy(register) {
     this.used.push(register);
   }
 
-  unbusy(register: number) {
+  unbusy(register) {
     this.used.splice(this.used.indexOf(register), 1);
   }
 }
 
 class Debugger extends EventEmitter {
-  private memoryjs: MemoryJS;
-  private registers: Registers;
-  private attached: boolean;
-  private intervals: Interval[];
-  constructor(memoryjs: MemoryJS) {
+  constructor(memoryprocess) {
     super();
-    this.memoryjs = memoryjs;
+    this.memoryprocess = memoryprocess;
     this.registers = new Registers();
     this.attached = false;
     this.intervals = [];
   }
 
-  attach(processId: number, killOnDetach = false): boolean {
-    const success = this.memoryjs.attachDebugger(processId, killOnDetach);
+  attach(processId, killOnDetach = false) {
+    const success = this.memoryprocess.attachDebugger(processId, killOnDetach);
 
     if (success) {
       this.attached = true;
@@ -95,59 +75,45 @@ class Debugger extends EventEmitter {
     return success;
   }
 
-  detach(processId: number): boolean {
+  detach(processId) {
     this.intervals.map(({ id }) => clearInterval(id));
-    return this.memoryjs.detachDebugger(processId);
+    return this.memoryprocess.detachDebugger(processId);
   }
 
-  removeHardwareBreakpoint(processId: number, register: number): boolean {
-    const success = this.memoryjs.removeHardwareBreakpoint(processId, register);
+  removeHardwareBreakpoint(processId, register) {
+    const success = this.memoryprocess.removeHardwareBreakpoint(processId, register);
 
     if (success) {
       this.registers.unbusy(register);
     }
 
     // Find the register's corresponding interval and delete it
-    for (const { register: r, id } of this.intervals) {
+    this.intervals.forEach(({ register: r, id }) => {
       if (r === register) {
         clearInterval(id);
       }
-    }
+    });
 
     return success;
   }
 
-  setHardwareBreakpoint(
-    processId: number,
-    address: number,
-    trigger: string,
-    dataType: keyof typeof lengths,
-  ): number {
+  setHardwareBreakpoint(processId, address, trigger, dataType) {
     let size = lengths[dataType];
 
     // If we are breakpointing a string, we need to determine the length of it
-    if (dataType === "str" || dataType === "string") {
-      const { handle } = this.memoryjs.openProcess(processId);
-      const value = this.memoryjs.readMemory(
-        handle,
-        address,
-        "string",
-      );
+    if (dataType === 'str' || dataType === 'string') {
+      const { handle } = this.memoryprocess.openProcess(processId);
+      const value = this.memoryprocess.readMemory(handle, address, this.memoryprocess.STRING);
 
       size = value.length;
 
-      this.memoryjs.closeProcess(handle);
+      this.memoryprocess.closeProcess(handle);
     }
 
     // Obtain an available register
     const register = this.registers.getRegister();
-    const success = this.memoryjs.setHardwareBreakpoint(
-      processId,
-      address,
-      register,
-      trigger,
-      size,
-    );
+    const success = this.memoryprocess
+      .setHardwareBreakpoint(processId, address, register, trigger, size);
 
     // If the breakpoint was set, mark this register as busy
     if (success) {
@@ -158,24 +124,21 @@ class Debugger extends EventEmitter {
     return register;
   }
 
-  monitor(register: number, timeout = 100): undefined {
+  monitor(register, timeout = 100) {
     const id = setInterval(() => {
-      const debugEvent = this.memoryjs.awaitDebugEvent(register, timeout);
+      const debugEvent = this.memoryprocess.awaitDebugEvent(register, timeout);
 
       if (debugEvent) {
-        this.memoryjs.handleDebugEvent(
-          debugEvent.processId,
-          debugEvent.threadId,
-        );
+        this.memoryprocess.handleDebugEvent(debugEvent.processId, debugEvent.threadId);
 
         // Global event for all registers
-        this.emit("debugEvent", {
+        this.emit('debugEvent', {
           register,
           event: debugEvent,
         });
 
         // Event per register
-        this.emit(String(register), debugEvent);
+        this.emit(register, debugEvent);
       }
     }, 100);
 
@@ -185,7 +148,5 @@ class Debugger extends EventEmitter {
     });
   }
 }
-
-export { lengths };
 
 export default Debugger;

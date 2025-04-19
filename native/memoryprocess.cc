@@ -4,7 +4,7 @@
 #include <string>
 #include "module.h"
 #include "process.h"
-#include "memoryjs.h"
+#include "memoryprocess.h"
 #include "memory.h"
 #include "pattern.h"
 #include "functions.h"
@@ -12,6 +12,8 @@
 #include "debugger.h"
 
 #pragma comment(lib, "psapi.lib")
+#pragma comment(lib, "onecore.lib")
+
 
 process Process;
 // module Module;
@@ -103,21 +105,10 @@ Napi::Value openProcess(const Napi::CallbackInfo& args) {
   }
 }
 
-Napi::Value closeProcess(const Napi::CallbackInfo& args) {
+Napi::Value closeHandle(const Napi::CallbackInfo& args) {
   Napi::Env env = args.Env();
-
-  if (args.Length() != 1) {
-    Napi::Error::New(env, "requires 1 argument").ThrowAsJavaScriptException();
-    return env.Null();
-  }
-
-  if (!args[0].IsNumber()) {
-    Napi::Error::New(env, "first argument must be a number").ThrowAsJavaScriptException();
-    return env.Null();
-  }
-
-  Process.closeProcess((HANDLE)args[0].As<Napi::Number>().Int64Value());
-  return env.Null();
+  BOOL success = CloseHandle((HANDLE)args[0].As<Napi::Number>().Int64Value());
+  return Napi::Boolean::New(env, success);
 }
 
 Napi::Value getProcesses(const Napi::CallbackInfo& args) {
@@ -325,7 +316,14 @@ Napi::Value readMemory(const Napi::CallbackInfo& args) {
   Napi::Value retVal = env.Null();
 
   HANDLE handle = (HANDLE)args[0].As<Napi::Number>().Int64Value();
-  DWORD64 address = args[1].As<Napi::Number>().Int64Value();
+
+  DWORD64 address;
+  if (args[1].As<Napi::BigInt>().IsBigInt()) {
+    bool lossless;
+    address = args[1].As<Napi::BigInt>().Uint64Value(&lossless);
+  } else {
+    address = args[1].As<Napi::Number>().Int64Value();
+  }
 
   if (!strcmp(dataType, "int8") || !strcmp(dataType, "byte") || !strcmp(dataType, "char")) {
 
@@ -467,7 +465,15 @@ Napi::Value readBuffer(const Napi::CallbackInfo& args) {
   }
 
   HANDLE handle = (HANDLE)args[0].As<Napi::Number>().Int64Value();
-  DWORD64 address = args[1].As<Napi::Number>().Int64Value();
+
+  DWORD64 address;
+  if (args[1].As<Napi::BigInt>().IsBigInt()) {
+    bool lossless;
+    address = args[1].As<Napi::BigInt>().Uint64Value(&lossless);
+  } else {
+    address = args[1].As<Napi::Number>().Int64Value();
+  }
+
   SIZE_T size = args[2].As<Napi::Number>().Int64Value();
 
   // To fix the memory leak problem that was happening here, we need to release the
@@ -478,11 +484,11 @@ Napi::Value readBuffer(const Napi::CallbackInfo& args) {
   //
   // see: https://github.com/nodejs/node/issues/40936
   // see: https://sagivo.com/2015/09/30/Go-Native-Calling-C-From-NodeJS.html
-  const char* data = (char*) malloc(sizeof(char) * size);
+  char* data = (char*) malloc(sizeof(char) * size);
   Memory.readBuffer(handle, address, size, data);
 
   Napi::Buffer<char> buffer = Napi::Buffer<char>::Copy(env, data, size);
-  free((void*)data);
+  free(data);
   
   if (args.Length() == 4) {
     Napi::Function callback = args[3].As<Napi::Function>();
@@ -510,7 +516,14 @@ Napi::Value writeMemory(const Napi::CallbackInfo& args) {
   const char* dataType = dataTypeArg.c_str();
 
   HANDLE handle = (HANDLE)args[0].As<Napi::Number>().Int64Value();
-  DWORD64 address = args[1].As<Napi::Number>().Int64Value();
+
+  DWORD64 address;
+  if (args[1].As<Napi::BigInt>().IsBigInt()) {
+    bool lossless;
+    address = args[1].As<Napi::BigInt>().Uint64Value(&lossless);
+  } else {
+    address = args[1].As<Napi::Number>().Int64Value();
+  }
 
   if (!strcmp(dataType, "int8") || !strcmp(dataType, "byte") || !strcmp(dataType, "char")) {
 
@@ -538,15 +551,21 @@ Napi::Value writeMemory(const Napi::CallbackInfo& args) {
 
   } else if (!strcmp(dataType, "int64")) {
 
-    Napi::BigInt bigInt = args[2].As<Napi::BigInt>();
-    bool lossless;
-    Memory.writeMemory<int64_t>(handle, address, bigInt.Int64Value(&lossless));
+    if (args[2].As<Napi::BigInt>().IsBigInt()) {
+      bool lossless;
+      Memory.writeMemory<int64_t>(handle, address, args[2].As<Napi::BigInt>().Int64Value(&lossless));
+    } else {
+      Memory.writeMemory<int64_t>(handle, address, args[2].As<Napi::Number>().Int64Value());
+    }
 
   } else if (!strcmp(dataType, "uint64")) {
 
-    Napi::BigInt bigInt = args[2].As<Napi::BigInt>();
-    bool lossless;
-    Memory.writeMemory<uint64_t>(handle, address, bigInt.Uint64Value(&lossless));
+    if (args[2].As<Napi::BigInt>().IsBigInt()) {
+      bool lossless;
+      Memory.writeMemory<int64_t>(handle, address,  args[2].As<Napi::BigInt>().Uint64Value(&lossless));
+    } else {
+      Memory.writeMemory<int64_t>(handle, address, args[2].As<Napi::Number>().Int64Value());
+    }
 
   } else if (!strcmp(dataType, "float")) {
 
@@ -558,36 +577,34 @@ Napi::Value writeMemory(const Napi::CallbackInfo& args) {
 
   } else if (!strcmp(dataType, "ptr") || !strcmp(dataType, "pointer")) {
 
-    Napi::BigInt bigInt = args[2].As<Napi::BigInt>();
+    Napi::BigInt valueBigInt = args[2].As<Napi::BigInt>();
 
-    if (sizeof(intptr_t) == 8 && !bigInt.IsBigInt()) {
-      std::string error = "Writing memoryjs.PTR or memoryjs.POINTER on 64 bit target build requires you to supply a BigInt.";
-      error += " Rebuild the library with `npm run build32` to target 32 bit applications.";
+    if (sizeof(intptr_t) == 8 && !valueBigInt.IsBigInt()) {
+      std::string error = "Writing 'ptr' or 'pointer' on 64 bit target build requires you to supply a BigInt.";
       Napi::Error::New(env, error).ThrowAsJavaScriptException();
       return env.Null();
     }
 
-    if (bigInt.IsBigInt()) {
+    if (valueBigInt.IsBigInt()) {
       bool lossless;
-      Memory.writeMemory<intptr_t>(handle, address, bigInt.Int64Value(&lossless));
+      Memory.writeMemory<intptr_t>(handle, address, valueBigInt.Int64Value(&lossless));
     } else {
       Memory.writeMemory<intptr_t>(handle, address, args[2].As<Napi::Number>().Int32Value());
     }
 
   } else if (!strcmp(dataType, "uptr") || !strcmp(dataType, "upointer")) {
 
-    Napi::BigInt bigInt = args[2].As<Napi::BigInt>();
+    Napi::BigInt valueBigInt = args[2].As<Napi::BigInt>();
 
-    if (sizeof(uintptr_t) == 8 && !bigInt.IsBigInt()) {
-      std::string error = "Writing memoryjs.PTR or memoryjs.POINTER on 64 bit target build requires you to supply a BigInt.";
-      error += " Rebuild the library with `npm run build32` to target 32 bit applications.";
+    if (sizeof(uintptr_t) == 8 && !valueBigInt.IsBigInt()) {
+      std::string error = "Writing 'ptr' or 'pointer' on 64 bit target build requires you to supply a BigInt.";
       Napi::Error::New(env, error).ThrowAsJavaScriptException();
       return env.Null();
     }
 
-    if (bigInt.IsBigInt()) {
+    if (valueBigInt.IsBigInt()) {
       bool lossless;
-      Memory.writeMemory<uintptr_t>(handle, address, bigInt.Uint64Value(&lossless));
+      Memory.writeMemory<uintptr_t>(handle, address, valueBigInt.Uint64Value(&lossless));
     } else {
       Memory.writeMemory<uintptr_t>(handle, address, args[2].As<Napi::Number>().Uint32Value());
     }
@@ -649,10 +666,18 @@ Napi::Value writeBuffer(const Napi::CallbackInfo& args) {
   }
 
   HANDLE handle = (HANDLE)args[0].As<Napi::Number>().Int64Value();
-  DWORD64 address = args[1].As<Napi::Number>().Int64Value();
+
+  DWORD64 address;
+  if (args[1].As<Napi::BigInt>().IsBigInt()) {
+    bool lossless;
+    address = args[1].As<Napi::BigInt>().Uint64Value(&lossless);
+  } else {
+    address = args[1].As<Napi::Number>().Int64Value();
+  }
+
   SIZE_T length = args[2].As<Napi::Buffer<char>>().Length();
-  const char* data = args[2].As<Napi::Buffer<char>>().Data();
-  Memory.writeMemory(handle, address, data, length);
+  char* data = args[2].As<Napi::Buffer<char>>().Data();
+  Memory.writeMemory<char*>(handle, address, data, length);
 
   return env.Null();
 }
@@ -669,7 +694,7 @@ Napi::Value writeBuffer(const Napi::CallbackInfo& args) {
 
 //   // matching address
 //   uintptr_t address = 0;
-//   char* errorMessage = "";
+//   const char* errorMessage = "";
 
 //   // read memory region occupied by the module to pattern match inside
 //   std::vector<unsigned char> moduleBytes = std::vector<unsigned char>(baseSize);
@@ -812,7 +837,15 @@ Napi::Value findPatternByAddress(const Napi::CallbackInfo& args) {
   }
 
   HANDLE handle = (HANDLE)args[0].As<Napi::Number>().Int64Value();
-  DWORD64 baseAddress = args[1].As<Napi::Number>().Int64Value();
+
+  DWORD64 baseAddress;
+  if (args[1].As<Napi::BigInt>().IsBigInt()) {
+    bool lossless;
+    baseAddress = args[1].As<Napi::BigInt>().Uint64Value(&lossless);
+  } else {
+    baseAddress = args[1].As<Napi::Number>().Int64Value();
+  }
+
   std::string pattern(args[2].As<Napi::String>().Utf8Value());
   short flags = args[3].As<Napi::Number>().Uint32Value();
   uint32_t patternOffset = args[4].As<Napi::Number>().Uint32Value();
@@ -901,7 +934,14 @@ Napi::Value callFunction(const Napi::CallbackInfo& args) {
 
   HANDLE handle = (HANDLE)args[0].As<Napi::Number>().Int64Value();
   functions::Type returnType = (functions::Type) args[2].As<Napi::Number>().Uint32Value();
-  DWORD64 address = args[3].As<Napi::Number>().Int64Value();
+
+  DWORD64 address;
+  if (args[3].As<Napi::BigInt>().IsBigInt()) {
+    bool lossless;
+    address = args[3].As<Napi::BigInt>().Uint64Value(&lossless);
+  } else {
+    address = args[3].As<Napi::Number>().Int64Value();
+  }
 
   const char* errorMessage = "";
   Call data = functions::call<int>(handle, parsedArgs, returnType, address, &errorMessage);
@@ -1454,6 +1494,55 @@ Napi::Value unloadDll(const Napi::CallbackInfo& args) {
   }
 }
 
+Napi::Value openFileMapping(const Napi::CallbackInfo& args) {
+  Napi::Env env = args.Env();
+
+  std::string fileName(args[0].As<Napi::String>().Utf8Value());
+
+  HANDLE fileHandle = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, fileName.c_str());
+
+  if (fileHandle == NULL) {
+    Napi::Error::New(env, Napi::String::New(env, "Error opening handle to file!")).ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  return Napi::Value::From(env, (uintptr_t) fileHandle);
+}
+
+Napi::Value mapViewOfFile(const Napi::CallbackInfo& args) {
+  Napi::Env env = args.Env();
+
+  HANDLE processHandle = (HANDLE)args[0].As<Napi::Number>().Int64Value();
+  HANDLE fileHandle = (HANDLE)args[1].As<Napi::Number>().Int64Value();
+
+  uint64_t offset;
+  if (args[2].As<Napi::BigInt>().IsBigInt()) {
+    bool lossless;
+    offset = args[2].As<Napi::BigInt>().Uint64Value(&lossless);
+  } else {
+    offset = args[2].As<Napi::Number>().Int64Value();
+  }
+  
+  size_t viewSize;
+  if (args[3].As<Napi::BigInt>().IsBigInt()) {
+    bool lossless;
+    viewSize = args[3].As<Napi::BigInt>().Uint64Value(&lossless);
+  } else {
+    viewSize = args[3].As<Napi::Number>().Int64Value();
+  }
+
+  ULONG pageProtection = args[4].As<Napi::Number>().Int64Value();
+
+  LPVOID baseAddress = MapViewOfFile2(fileHandle, processHandle, offset, NULL, viewSize, 0, pageProtection);
+
+  if (baseAddress == NULL) {
+    Napi::Error::New(env, Napi::String::New(env, "Error mapping file to process!")).ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  return Napi::Value::From(env, (uintptr_t) baseAddress);
+}
+
 // https://stackoverflow.com/a/17387176
 std::string GetLastErrorToString() {
   DWORD errorMessageID = ::GetLastError();
@@ -1484,7 +1573,7 @@ std::string GetLastErrorToString() {
 
 Napi::Object init(Napi::Env env, Napi::Object exports) {
   exports.Set(Napi::String::New(env, "openProcess"), Napi::Function::New(env, openProcess));
-  exports.Set(Napi::String::New(env, "closeProcess"), Napi::Function::New(env, closeProcess));
+  exports.Set(Napi::String::New(env, "closeHandle"), Napi::Function::New(env, closeHandle));
   exports.Set(Napi::String::New(env, "getProcesses"), Napi::Function::New(env, getProcesses));
   exports.Set(Napi::String::New(env, "getModules"), Napi::Function::New(env, getModules));
   exports.Set(Napi::String::New(env, "findModule"), Napi::Function::New(env, findModule));
@@ -1508,7 +1597,9 @@ Napi::Object init(Napi::Env env, Napi::Object exports) {
   exports.Set(Napi::String::New(env, "removeHardwareBreakpoint"), Napi::Function::New(env, removeHardwareBreakpoint));
   exports.Set(Napi::String::New(env, "injectDll"), Napi::Function::New(env, injectDll));
   exports.Set(Napi::String::New(env, "unloadDll"), Napi::Function::New(env, unloadDll));
+  exports.Set(Napi::String::New(env, "openFileMapping"), Napi::Function::New(env, openFileMapping));
+  exports.Set(Napi::String::New(env, "mapViewOfFile"), Napi::Function::New(env, mapViewOfFile));
   return exports;
 }
 
-NODE_API_MODULE(memoryjs, init)
+NODE_API_MODULE(memoryprocess, init)

@@ -3,7 +3,7 @@
 #include <TlHelp32.h>
 #include <vector>
 #include "process.h"
-#include "memoryjs.h"
+#include "memoryprocess.h"
 
 process::process() {}
 process::~process() {}
@@ -62,10 +62,6 @@ process::Pair process::openProcess(DWORD processId, const char** errorMessage) {
     handle,
     process,
   };
-}
-
-void process::closeProcess(HANDLE hProcess){
-  CloseHandle(hProcess);
 }
 
 std::vector<PROCESSENTRY32> process::getProcesses(const char** errorMessage) {

@@ -1,46 +1,38 @@
 name: Release
 
-permissions:
-  contents: write
-  packages: write
-
 on:
-  release:
-    types:
-      - published
   workflow_dispatch:
     inputs:
-      checkout-branch:
-        description: 'The branch or tag to checkout (same as workflow if not specified)'
-        required: false
+      branch:
+        description: 'The branch to release from (e.g., main, beta, next). Semantic-release must be configured for this branch.'
+        required: true
+        default: 'main'
+  push:
+    branches:
+      - main
+      - beta
 
-jobs: 
+jobs:
   build:
     strategy:
       fail-fast: false
-    runs-on: windows-2019
+    runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.checkout-branch }}
-          submodules: true
-
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
+          persist-credentials: false
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
 
+      - name: Install dependencies
+        run: bun install --ignore-scripts --no-save
+
       - name: Install node-gyp
         run: bun add -g node-gyp
-
-      - name: Install dependencies
-        run: bun install --ignore-scripts
 
       - name: Build
         run: bun run build
@@ -48,32 +40,51 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: memoryjs
+          name: memoryprocess
           path: lib/
   
   release:
     needs: [build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.checkout-branch }}
-          submodules: true
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || github.ref }}
+          persist-credentials: false
 
       - name: Download artifacts
-        uses: actions/download-artifact@v4.1.7
+        uses: actions/download-artifact@v4
         with:
-          name: memoryjs
+          name: memoryprocess
           path: lib/
-
-      - name: Setup Node
+      
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
-        env:
-          NODE_AUTH_TOKEN: ${{secrets.NPM_TOKEN}}
 
-      - name: Publish release
-        run: npm publish --access public
+      - name: Configure npm
+        run: |
+          echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" > ~/.npmrc
+          npm whoami
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+      
+      - name: Install semantic-release plugins
+        run: npm install @semantic-release/commit-analyzer @semantic-release/release-notes-generator @semantic-release/npm @semantic-release/github @semantic-release/git
+
+      - name: Run semantic-release
+        run: npx semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

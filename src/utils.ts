@@ -1,18 +1,5 @@
-import type { DataType, MemoryJS } from "./types";
-
-export interface StructronContext {
-  buffer: Buffer;
-}
-
-export interface StructronType {
-  read(buffer: Buffer, offset: number): string;
-  write(value: string, context: StructronContext, offset: number): undefined;
-  SIZE: number;
-}
-
-export type Platform = "32" | "64";
-export type BufferEncoding = "utf8" | "utf16le" | "ascii";
-
+// @ts-nocheck
+// TODO: In the future, we plan to add proper typing
 const SIZEOF_STDSTRING_32BIT = 24;
 const SIZEOF_STDSTRING_64BIT = 32;
 const STDSTRING_LENGTH_OFFSET = 0x10;
@@ -31,95 +18,58 @@ const STDSTRING_LENGTH_OFFSET = 0x10;
  * @param platform the architecture of the process, either "32" or "64"
  * @param encoding the encoding type of the string
  */
-export const STRUCTRON_TYPE_STRING =
-  (memoryjs: MemoryJS) =>
-  (
-    handle: number,
-    structAddress: bigint,
-    platform: Platform,
-    encoding: BufferEncoding = "utf8",
-  ): StructronType => ({
-    read(buffer: Buffer, offset: number): string {
-      // get string length from `std::string` container
-      const length = buffer.readUInt32LE(offset + STDSTRING_LENGTH_OFFSET);
+export const STRUCTRON_TYPE_STRING = memoryprocess => (handle, structAddress, platform, encoding = 'utf8') => ({
+  read(buffer, offset) {
+    // get string length from `std::string` container
+    const length = buffer.readUInt32LE(offset + STDSTRING_LENGTH_OFFSET);
 
-      // if length > 15, `std::string` has a pointer to the string
-      if (length > 15) {
-        const pointer =
-          platform === "64"
-            ? buffer.readBigInt64LE(offset)
-            : BigInt(buffer.readUInt32LE(offset));
-        return memoryjs.readMemory(handle, pointer, "string");
-      }
+    // if length > 15, `std::string` has a pointer to the string
+    if (length > 15) {
+      const pointer = platform === '64' ? buffer.readBigInt64LE(offset) : buffer.readUInt32LE(offset);
+      return memoryprocess.readMemory(handle, Number(pointer), 'string');
+    }
 
-      // if length <= 15, `std::string` directly contains the string
-      return buffer.toString(encoding, offset, offset + length);
-    },
-    write(value: string, context: StructronContext, offset: number): undefined {
-      // address containing the length of the string
-      const lengthAddress =
-        structAddress + BigInt(offset + STDSTRING_LENGTH_OFFSET);
+    // if length <= 15, `std::string` directly contains the string
+    return buffer.toString(encoding, offset, offset + length);
+  },
+  write(value, context, offset) {
+    // address containing the length of the string
+    const lengthAddress = structAddress + offset + STDSTRING_LENGTH_OFFSET;
 
-      // get existing `std::string` buffer
-      const bufferSize =
-        platform === "64" ? SIZEOF_STDSTRING_64BIT : SIZEOF_STDSTRING_32BIT;
-      const existingBuffer = memoryjs.readBuffer(
-        handle,
-        structAddress + BigInt(offset),
-        bufferSize,
-      );
+    // get existing `std::string` buffer
+    const bufferSize = platform === '64' ? SIZEOF_STDSTRING_64BIT : SIZEOF_STDSTRING_32BIT;
+    const existingBuffer = memoryprocess.readBuffer(handle, structAddress + offset, bufferSize);
 
-      // fetch length of string in memory (to determine if it's pointer based)
-      const length = memoryjs.readMemory(handle, lengthAddress, "int32");
+    // fetch length of string in memory (to determine if it's pointer based)
+    const length = memoryprocess.readMemory(handle, lengthAddress, 'int');
 
-      if (
-        (length > 15 && value.length <= 15) ||
-        (length <= 15 && value.length > 15)
-      ) {
-        // there are two ways strings are stored: directly or with a pointer,
-        // we can't go from one to the other (without introducing more complexity),
-        // so just skip the bytes to prevent crashing. if a pointer is used, we could
-        // technically write any length, but the next time we try writing, we will read
-        // the length and assume it's not stored via pointer and will lead to crashes
+    if ((length > 15 && value.length <= 15) || (length <= 15 && value.length > 15)) {
+      // there are two ways strings are stored: directly or with a pointer,
+      // we can't go from one to the other (without introducing more complexity),
+      // so just skip the bytes to prevent crashing. if a pointer is used, we could
+      // technically write any length, but the next time we try writing, we will read
+      // the length and assume it's not stored via pointer and will lead to crashes
 
-        // write existing buffer without changes
-        existingBuffer.copy(context.buffer, offset);
-        return;
-      }
-
-      // write new length
-      memoryjs.writeMemory(handle, lengthAddress, value.length, "uint32");
-      existingBuffer.writeUInt32LE(value.length, STDSTRING_LENGTH_OFFSET);
-
-      if (length > 15 && value.length > 15) {
-        // write new string in memory
-        const pointer = memoryjs.readMemory(
-          handle,
-          structAddress + BigInt(offset),
-          "pointer",
-        );
-        memoryjs.writeMemory(
-          handle,
-          typeof pointer === "number" ? BigInt(pointer) : pointer,
-          value,
-          "string",
-        );
-      } else if (length <= 15 && value.length <= 15) {
-        // write new string directly into buffer
-        existingBuffer.write(value, encoding);
-      }
-
-      // write our new `std::string` buffer into the buffer we are creating
+      // write existing buffer without changes
       existingBuffer.copy(context.buffer, offset);
-    },
-    SIZE: platform === "64" ? SIZEOF_STDSTRING_64BIT : SIZEOF_STDSTRING_32BIT,
-  });
+      return;
+    }
 
-/**
- * Type guard to check if a DataType is a big-endian data type
- * @param dataType The data type to check
- * @returns True if the data type is big-endian
- */
-export function isDataTypeBE(dataType: DataType): dataType is DataType {
-  return dataType.toLowerCase().endsWith("_be");
-}
+    // write new length
+    memoryprocess.writeMemory(handle, lengthAddress, value.length, 'uint32');
+    existingBuffer.writeUInt32LE(value.length, STDSTRING_LENGTH_OFFSET);
+
+    if (length > 15 && value.length > 15) {
+      // write new string in memory
+      const pointer = memoryprocess.readMemory(handle, structAddress + offset, 'pointer');
+      memoryprocess.writeMemory(handle, pointer, value, 'string');
+    } else if (length <= 15 && value.length <= 15) {
+      // write new string directly into buffer
+      existingBuffer.write(value, encoding);
+    }
+
+    // write our new `std::string` buffer into the buffer we are creating
+    existingBuffer.copy(context.buffer, offset);
+  },
+  SIZE: platform === '64' ? SIZEOF_STDSTRING_64BIT : SIZEOF_STDSTRING_32BIT,
+});

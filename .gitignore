@@ -1,16 +1,11 @@
+node_modules
+lib
 build
-test.js
-npm-debug.log
 .vscode
 .vs
-node_modules
-test/vcxproj/Debug
-test/vcxproj/Release
-test/*.exe
-test/.vs
-etc
-temp
-temptypes
-tempbuild
-lib
-release_body.md
+.windsurfrules
+bun.lock*
+
+# Logs
+*.log
+npm-debug.log*

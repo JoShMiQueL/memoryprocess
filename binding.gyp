@@ -1,12 +1,12 @@
 {
   "targets": [
     {
-      "target_name": "memoryjs",
+      "target_name": "native",
       "include_dirs" : [
         "<!@(node -p \"require('node-addon-api').include\")"
       ],
       "sources": [
-        "native/memoryjs.cc",
+        "native/memoryprocess.cc",
         "native/memory.cc",
         "native/process.cc",
         "native/module.cc",

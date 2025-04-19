@@ -4,7 +4,7 @@ typescript:
 
 native:
   - changed-files:
-      any-glob-to-any-file: ['native/**/*', 'binding.gyp']
+      any-glob-to-any-file: ['native/**/*']
 
 documentation:
   - changed-files:
@@ -20,7 +20,7 @@ examples:
 
 build:
   - changed-files:
-      any-glob-to-any-file: ['build.ts', 'build/**/*', 'tsconfig.json']
+      any-glob-to-any-file: ['build.ts', 'tsconfig.json']
 
 dependencies:
   - changed-files:

@@ -1,9 +1,8 @@
-#include <node.h>
 #include <windows.h>
 #include <TlHelp32.h>
 #include <vector>
 #include "pattern.h"
-#include "memoryjs.h"
+#include "memoryprocess.h"
 #include "process.h"
 #include "memory.h"
 
