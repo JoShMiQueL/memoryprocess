@@ -12,6 +12,9 @@ on:
       - main
       - beta
 
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
