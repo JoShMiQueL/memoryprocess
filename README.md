@@ -12,10 +12,10 @@
     <img alt="GitHub Actions Workflow Status" src="https://img.shields.io/github/actions/workflow/status/JoShMiQueL/memoryprocess/release.yml?branch=master&style=flat&logo=npm&label=Publish%20to%20npm">
   </a>
   <a href="https://www.npmjs.com/package/memoryprocess" target="_blank">
-    <img alt="NPM Downloads" src="https://img.shields.io/npm/dy/%40memoryprocess">
+    <img alt="NPM Downloads" src="https://img.shields.io/npm/dy/memoryprocess">
   </a>
   <a href="https://www.npmjs.com/package/memoryprocess" target="_blank">
-    <img alt="NPM Version" src="https://img.shields.io/npm/v/%40memoryprocess">
+    <img alt="NPM Version" src="https://img.shields.io/npm/v/memoryprocess">
   </a>
 </p>
 
