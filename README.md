@@ -21,6 +21,13 @@
 
 ---
 
+## ⚙️ Bundling with Bun
+If you want to bundle your `.ts` code to `.js` using Bun, add `memoryprocess` to the `--external` option when running `bun build`. For example:
+
+```bash
+bun build src/index.ts --external memoryprocess
+```
+
 ## 📖 API References (`src`)
 
 ### Main Functions
