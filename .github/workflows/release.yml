@@ -82,9 +82,6 @@ jobs:
 
       - name: Install dependencies
         run: npm ci --ignore-scripts
-      
-      - name: Install semantic-release plugins
-        run: npm install @semantic-release/commit-analyzer @semantic-release/release-notes-generator @semantic-release/npm @semantic-release/github @semantic-release/git
 
       - name: Run semantic-release
         run: npx semantic-release
