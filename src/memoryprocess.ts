@@ -9,6 +9,7 @@ import { STRUCTRON_TYPE_STRING } from './utils';
  * - remove callbacks from all functions and implement promise support using Napi
  * - validate argument types in JS space instead of C++
  * - refactor read/write memory functions to use buffers instead?
+ * - add support for more data types
  */
 
 /**
