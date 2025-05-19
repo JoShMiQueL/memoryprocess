@@ -43,7 +43,7 @@
     "@total-typescript/tsconfig": "1.0.4",
     "@types/bun": "1.2.10",
     "@types/node": "22.14.1",
-    "lefthook": "1.11.10",
+    "lefthook": "1.11.13",
     "typescript": "5.8.3"
   },
   "trustedDependencies": [
