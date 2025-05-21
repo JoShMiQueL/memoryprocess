@@ -16,83 +16,134 @@ public:
 
   template <class dataType>
   dataType readMemory(HANDLE hProcess, DWORD64 address) {
-    dataType cRead;
-    ReadProcessMemory(hProcess, (LPVOID)address, &cRead, sizeof(dataType), NULL);
+    if (hProcess == NULL || hProcess == INVALID_HANDLE_VALUE || address == 0) {
+      // Consider logging error or using a mechanism to report failure.
+      return dataType(); // Return default-constructed value on error.
+    }
+    dataType cRead{}; // Value initialize
+    SIZE_T bytesRead = 0;
+    if (!ReadProcessMemory(hProcess, (LPCVOID)address, &cRead, sizeof(dataType), &bytesRead) || bytesRead != sizeof(dataType)) {
+      // Consider logging GetLastError().
+      return dataType(); // Return default-constructed value on error.
+    }
     return cRead;
   }
 
-  BOOL readBuffer(HANDLE hProcess, DWORD64 address, SIZE_T size, const char* dstBuffer) {
-    return ReadProcessMemory(hProcess, (LPVOID)address, (LPVOID)dstBuffer, size, NULL);
+  BOOL readBuffer(HANDLE hProcess, DWORD64 address, SIZE_T size, char* dstBuffer) { // Changed to char*
+    if (hProcess == NULL || hProcess == INVALID_HANDLE_VALUE || address == 0 || dstBuffer == nullptr || size == 0) {
+      return FALSE;
+    }
+    SIZE_T bytesRead = 0;
+    // ReadProcessMemory returns 0 on failure.
+    return ReadProcessMemory(hProcess, (LPCVOID)address, (LPVOID)dstBuffer, size, &bytesRead) && (bytesRead == size);
   }
 
   char readChar(HANDLE hProcess, DWORD64 address) {
-    char value;
-    ReadProcessMemory(hProcess, (LPVOID)address, &value, sizeof(char), NULL);
+    if (hProcess == NULL || hProcess == INVALID_HANDLE_VALUE || address == 0) {
+      return '\0'; // Ambiguous error indicator
+    }
+    char value = '\0';
+    SIZE_T bytesRead = 0;
+    if (!ReadProcessMemory(hProcess, (LPCVOID)address, &value, sizeof(char), &bytesRead) || bytesRead != sizeof(char)) {
+      return '\0'; // Ambiguous error indicator
+    }
     return value;
 	}
 
   BOOL readString(HANDLE hProcess, DWORD64 address, std::string* pString) {
-    int length = 0;
-    int BATCH_SIZE = 256;
-    char* data = (char*) malloc(sizeof(char) * BATCH_SIZE);
-    while (length <= BATCH_SIZE * 4096) {
-      BOOL success = readBuffer(hProcess, address + length, BATCH_SIZE, data);
+    if (hProcess == NULL || hProcess == INVALID_HANDLE_VALUE || address == 0 || pString == nullptr) {
+      return FALSE;
+    }
 
-      if (success == 0) {
-        free(data);
-        break;
+    pString->clear();
+    const int BATCH_SIZE = 256; // Keep const
+    // Use std::vector for automatic memory management and safety.
+    std::vector<char> batch_buffer(BATCH_SIZE);
+    DWORD64 current_address = address;
+
+    for (int i = 0; i < 4096; ++i) { // Limit iterations to prevent infinite loops (e.g. MAX_STRING_READ_ITERATIONS)
+      SIZE_T bytesRead = 0;
+      // ReadProcessMemory directly into std::vector's data buffer
+      if (!ReadProcessMemory(hProcess, (LPCVOID)current_address, batch_buffer.data(), BATCH_SIZE, &bytesRead) || bytesRead == 0) {
+        // If ReadProcessMemory fails or reads 0 bytes, it might be end of readable memory or an error.
+        // If something was already read into pString, it might be a partial success.
+        return !pString->empty(); // Return true if we managed to read something.
       }
 
-      for (const char* ptr = data; ptr - data < BATCH_SIZE; ++ptr) {
-        if (*ptr == '\0') {
-          length += ptr - data + 1;
-
-          char* buffer = (char*) malloc(length);
-          readBuffer(hProcess, address, length, buffer);
-
-          *pString = std::string(buffer);
-
-          free(data);
-          free(buffer);
-
-          return TRUE;
+      for (size_t j = 0; j < bytesRead; ++j) {
+        if (batch_buffer[j] == '\0') {
+          pString->append(batch_buffer.data(), j); // Append the part of buffer before null terminator
+          return TRUE; // Found null terminator
         }
       }
+      pString->append(batch_buffer.data(), bytesRead); // Append full batch if no null terminator found
+      current_address += bytesRead;
 
-      length += BATCH_SIZE;
+      // If less than BATCH_SIZE was read, it implies end of readable data or last segment.
+      if (bytesRead < BATCH_SIZE) {
+        // This could mean the string ended exactly at the boundary without a null terminator
+        // or we hit unreadable memory. If no null terminator was found, this string is unterminated.
+        // The current logic will return FALSE after the loop if no null terminator is ever found.
+        // For very long strings without null terminators, this might be an issue.
+        // Let's consider it success if anything was read and we hit end of readable memory.
+        return !pString->empty();
+      }
+    }
+    // If loop finishes, it means string is too long or unterminated within reasonable limits.
+    return FALSE; // Or true if partial read is acceptable: !pString->empty();
+  }
+
+
+  template <class dataType>
+  BOOL writeMemory(HANDLE hProcess, DWORD64 address, dataType value) {
+    if (hProcess == NULL || hProcess == INVALID_HANDLE_VALUE || address == 0) {
+      return FALSE;
+    }
+    SIZE_T bytesWritten = 0;
+    if (!WriteProcessMemory(hProcess, (LPVOID)address, &value, sizeof(dataType), &bytesWritten) || bytesWritten != sizeof(dataType)) {
+      // Consider logging GetLastError().
+      return FALSE;
+    }
+    return TRUE;
+  }
+
+  // This overload is for writing raw buffers/structs where size is explicitly given.
+  // 'value' here is treated as a pointer if T is a pointer, or address of 'value' if T is not a pointer.
+  template <class dataType>
+  BOOL writeMemory(HANDLE hProcess, DWORD64 address, dataType value, SIZE_T size) {
+    if (hProcess == NULL || hProcess == INVALID_HANDLE_VALUE || address == 0 || size == 0) {
+      return FALSE;
     }
 
-    return FALSE;
-  }
-
-  template <class dataType>
-  void writeMemory(HANDLE hProcess, DWORD64 address, dataType value) {
-    WriteProcessMemory(hProcess, (LPVOID)address, &value, sizeof(dataType), NULL);
-  }
-
-  template <class dataType>
-  void writeMemory(HANDLE hProcess, DWORD64 address, dataType value, SIZE_T size) {
-	  void* buffer;
-
-	  if (std::is_pointer<dataType>::value) {
-      buffer = (void*)value;
+    void* bufferPtr;
+    if (std::is_pointer<dataType>::value) {
+      bufferPtr = (void*)value;
+      if (bufferPtr == nullptr) return FALSE; // Null pointer passed
     } else {
-      buffer = &value; 
+      bufferPtr = &value;
     }
 
-	  WriteProcessMemory(hProcess, (LPVOID)address, buffer, size, NULL);
+    SIZE_T bytesWritten = 0;
+	  if (!WriteProcessMemory(hProcess, (LPVOID)address, bufferPtr, size, &bytesWritten) || bytesWritten != size) {
+      // Consider logging GetLastError().
+      return FALSE;
+    }
+    return TRUE;
   }
 
-  // Write String, Method 1: Utf8Value is converted to string, get pointer and length from string
-  // template <>
-  // void writeMemory<std::string>(HANDLE hProcess, DWORD address, std::string value) {
-  //  WriteProcessMemory(hProcess, (LPVOID)address, value.c_str(), value.length(), NULL);
-  // }
 
-  // Write String, Method 2: get pointer and length from Utf8Value directly
-  void writeMemory(HANDLE hProcess, DWORD64 address, char* value, SIZE_T size) {
-    WriteProcessMemory(hProcess, (LPVOID)address, value, size, NULL);
+  // Overload for writing char* (C-style strings or raw byte arrays)
+  BOOL writeMemory(HANDLE hProcess, DWORD64 address, const char* value, SIZE_T size) { // Changed to const char*
+    if (hProcess == NULL || hProcess == INVALID_HANDLE_VALUE || address == 0 || value == nullptr || size == 0) {
+      return FALSE;
+    }
+    SIZE_T bytesWritten = 0;
+    if (!WriteProcessMemory(hProcess, (LPVOID)address, value, size, &bytesWritten) || bytesWritten != size) {
+      // Consider logging GetLastError().
+      return FALSE;
+    }
+    return TRUE;
   }
 };
 #endif
-#pragma once
+// #pragma once // Duplicate pragma once removed

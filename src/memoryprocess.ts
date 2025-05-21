@@ -20,6 +20,17 @@ import { STRUCTRON_TYPE_STRING } from './utils';
  * @returns The handle of the opened process or undefined if the process was not found.
  */
 function openProcess(processIdentifier: string | number, callback?: ((handle: number, errorMessage: string) => void) | undefined): Process {
+  if (processIdentifier === null || processIdentifier === undefined) {
+    throw new Error('Invalid process identifier: cannot be null or undefined.');
+  }
+  if (typeof processIdentifier === 'string' && processIdentifier.trim() === '') {
+    throw new Error('Invalid process identifier: cannot be an empty string.');
+  }
+  if (typeof processIdentifier === 'number' && processIdentifier < 0) {
+    // Assuming process IDs are non-negative. Some systems might use -1 for special cases, adjust if needed.
+    throw new Error('Invalid process identifier: process ID cannot be negative.');
+  }
+
   if (!callback) {
     return memoryprocess.openProcess(processIdentifier);
   }
@@ -28,12 +39,64 @@ function openProcess(processIdentifier: string | number, callback?: ((handle: nu
 }
 
 /**
+ * Scans a specific region of memory in a process for a given pattern.
+ * The pattern can include wildcards (e.g., "??").
+ *
+ * @param handle - The handle of the process.
+ * @param baseAddress - The starting address of the memory region to scan. Can be a number or BigInt.
+ * @param scanSize - The size of the memory region to scan. Can be a number or BigInt.
+ * @param pattern - The pattern string to search for (e.g., "AB ?? CD EF").
+ * @param flags - Optional flags for the scan (e.g., ST_READ, ST_SUBTRACT from native layer). Defaults to 0.
+ * @param patternOffset - Optional offset to add to the found pattern's address. Defaults to 0.
+ * @returns The memory address where the pattern was found, or 0 (or BigInt(0)) if not found.
+ * @throws Will throw an error if input validation fails or if the native call fails.
+ */
+function findPatternInRegion(
+  handle: number,
+  baseAddress: number | bigint,
+  scanSize: number | bigint,
+  pattern: string,
+  flags: number = 0,
+  patternOffset: number = 0
+): number | bigint {
+  if (typeof handle !== 'number' || handle < 0) {
+    throw new Error('Invalid handle: must be a non-negative number.');
+  }
+  if ((typeof baseAddress !== 'number' && typeof baseAddress !== 'bigint') || baseAddress < 0) {
+    throw new Error('Invalid baseAddress: must be a non-negative number or BigInt.');
+  }
+  if (baseAddress == 0) { // Using == to catch 0 and 0n
+    throw new Error('Invalid baseAddress: cannot be zero.');
+  }
+  if ((typeof scanSize !== 'number' && typeof scanSize !== 'bigint') || scanSize <= 0) { // Using <= to catch 0 and 0n for scanSize
+    throw new Error('Invalid scanSize: must be a positive number or BigInt.');
+  }
+  if (typeof pattern !== 'string' || pattern.trim() === '') {
+    throw new Error('Invalid pattern: must be a non-empty string.');
+  }
+  if (typeof flags !== 'number' || flags < 0) {
+    throw new Error('Invalid flags: must be a non-negative number.');
+  }
+  if (typeof patternOffset !== 'number') { // Offset can be 0 or positive or negative
+    throw new Error('Invalid patternOffset: must be a number.');
+  }
+
+  // The N-API function is expected to handle BigInts correctly for address/size/return value
+  return memoryprocess.findPatternInRegion(handle, baseAddress, scanSize, pattern, flags, patternOffset);
+}
+
+
+/**
  * Closes a handle to a process.
  * 
  * @param handle - The handle of the process to close.
  * @returns Whether the operation was successful.
  */
 function closeHandle(handle: number) {
+  if (typeof handle !== 'number' || handle < 0) {
+    // Assuming handles are non-negative. Adjust if 0 or other values have special meaning.
+    throw new Error('Invalid handle: must be a non-negative number.');
+  }
   return memoryprocess.closeHandle(handle);
 }
 
@@ -60,6 +123,13 @@ function getProcesses(callback?: ((processes: Process[], errorMessage: string) =
  * @returns The module object or undefined if the module was not found.
  */
 function findModule(moduleName: string, processId: number, callback?: ((module: Module, errorMessage: string) => void) | undefined) {
+  if (moduleName === null || moduleName === undefined || typeof moduleName !== 'string' || moduleName.trim() === '') {
+    throw new Error('Invalid module name: cannot be null, undefined, or an empty string.');
+  }
+  if (typeof processId !== 'number' || processId < 0) {
+    throw new Error('Invalid processId: must be a non-negative number.');
+  }
+
   if (!callback) {
     return memoryprocess.findModule(moduleName, processId);
   }
@@ -75,6 +145,10 @@ function findModule(moduleName: string, processId: number, callback?: ((module: 
  * @returns An array of module objects or undefined if the operation failed.
  */
 function getModules(processId: number, callback?: ((modules: Module[], errorMessage: string) => void) | undefined) {
+  if (typeof processId !== 'number' || processId < 0) {
+    throw new Error('Invalid processId: must be a non-negative number.');
+  }
+
   if (!callback) {
     return memoryprocess.getModules(processId);
   }
@@ -92,6 +166,17 @@ function getModules(processId: number, callback?: ((modules: Module[], errorMess
  * @returns The read value or undefined if the operation failed.
  */
 function readMemory<T extends DataType>(handle: number, address: number, dataType: T, callback?: (value: MemoryData<T>, errorMessage: string) => void): MemoryData<T> | undefined {
+  if (typeof handle !== 'number' || handle < 0) {
+    throw new Error('Invalid handle: must be a non-negative number.');
+  }
+  if (typeof address !== 'number' || address < 0) {
+    throw new Error('Invalid address: must be a non-negative number.');
+  }
+  if (typeof dataType !== 'string' || !dataType) {
+    throw new Error('Invalid dataType: must be a non-empty string.');
+  }
+  // TODO: Add check against a list of valid DataTypes if available
+
   if (dataType.endsWith('_be')) {
     return readMemoryBE(handle, address, dataType, callback);
   }
@@ -113,6 +198,17 @@ function readMemory<T extends DataType>(handle: number, address: number, dataTyp
  * @returns The read value or undefined if the operation failed.
  */
 function readMemoryBE<T extends DataType>(handle: number, address: number, dataType: T, callback?: (value: MemoryData<T>, errorMessage: string) => void): MemoryData<T> | undefined {
+  if (typeof handle !== 'number' || handle < 0) {
+    throw new Error('Invalid handle: must be a non-negative number.');
+  }
+  if (typeof address !== 'number' || address < 0) {
+    throw new Error('Invalid address: must be a non-negative number.');
+  }
+  if (typeof dataType !== 'string' || !dataType.endsWith('_be')) {
+    throw new Error('Invalid dataType: must be a non-empty string ending with "_be".');
+  }
+  // TODO: Add check against a list of valid DataTypes if available
+
   let value: number | bigint | null = null;
 
   switch (dataType) {
@@ -176,6 +272,17 @@ function readMemoryBE<T extends DataType>(handle: number, address: number, dataT
  * @returns A buffer containing the read data or undefined if the operation failed.
  */
 function readBuffer(handle: number, address: number, size: number, callback?: (buffer: Buffer, errorMessage: string) => void): Buffer {
+  if (typeof handle !== 'number' || handle < 0) {
+    throw new Error('Invalid handle: must be a non-negative number.');
+  }
+  if (typeof address !== 'number' || address < 0) {
+    throw new Error('Invalid address: must be a non-negative number.');
+  }
+  if (typeof size !== 'number' || size <= 0) {
+    // Size should be positive. Zero-size reads might be valid in some contexts but typically not.
+    throw new Error('Invalid size: must be a positive number.');
+  }
+
   if (arguments.length === 3) {
     return memoryprocess.readBuffer(handle, address, size);
   }
@@ -196,16 +303,39 @@ function readBuffer(handle: number, address: number, size: number, callback?: (b
 function writeMemory(handle: number, address: number, value: string, dataType: 'str'|'string'): boolean;
 function writeMemory<T extends Exclude<DataType,'str'|'string'>>(handle: number, address: number, value: MemoryData<T>, dataType: T): boolean;
 function writeMemory(handle: number, address: number, value: any, dataType: DataType): boolean {
+  if (typeof handle !== 'number' || handle < 0) {
+    throw new Error('Invalid handle: must be a non-negative number.');
+  }
+  if (typeof address !== 'number' || address < 0) {
+    throw new Error('Invalid address: must be a non-negative number.');
+  }
+  if (typeof dataType !== 'string' || !dataType) {
+    throw new Error('Invalid dataType: must be a non-empty string.');
+  }
+  // TODO: Add check against a list of valid DataTypes if available
+
   let dataValue: MemoryData<DataType> = value;
   if (dataType === 'str' || dataType === 'string') {
+    if (typeof value !== 'string') {
+      throw new Error(`Invalid value for dataType '${dataType}': expected a string.`);
+    }
     // ensure TS knows this branch yields a string for T = 'str'|'string'
     dataValue = ((value as string) + '\0') as MemoryData<DataType>;
   }
 
   const bigintTypes: DataType[] = ['int64', 'uint64', 'int64_be', 'uint64_be'];
-  if (bigintTypes.includes(dataType) && typeof value !== 'bigint') {
-    throw new Error(`${dataType.toUpperCase()} expects type BigInt`);
+  if (bigintTypes.includes(dataType)) {
+    if (typeof value !== 'bigint') {
+      throw new Error(`Invalid value for dataType '${dataType}': expected a BigInt.`);
+    }
+  } else if (dataType !== 'str' && dataType !== 'string') { // For other numeric types
+    if (typeof value !== 'number') {
+      // This check might be too broad if some other specific types expect e.g. boolean
+      // For now, assuming non-bigint, non-string types are numeric.
+      // throw new Error(`Invalid value for dataType '${dataType}': expected a number.`);
+    }
   }
+
 
   if (dataType.endsWith('_be')) {
     // dataValue narrowed to numeric types in BE branch
@@ -226,11 +356,23 @@ function writeMemory(handle: number, address: number, value: any, dataType: Data
  * @returns Whether the operation was successful.
  */
 function writeMemoryBE(handle: number, address: number, value: number | bigint, dataType: DataType): boolean {
+  if (typeof handle !== 'number' || handle < 0) {
+    throw new Error('Invalid handle: must be a non-negative number.');
+  }
+  if (typeof address !== 'number' || address < 0) {
+    throw new Error('Invalid address: must be a non-negative number.');
+  }
+  if (typeof dataType !== 'string' || !dataType.endsWith('_be')) {
+    throw new Error('Invalid dataType: must be a non-empty string ending with "_be".');
+  }
+  // TODO: Add check against a list of valid DataTypes if available
+
   let buffer: Buffer | null = null;
 
   switch (dataType) {
     case 'int64_be':
       if (typeof value !== 'bigint') {
+        // This specific check is redundant due to the check in writeMemory, but good for standalone use.
         throw new Error('INT64_BE expects type BigInt');
       }
       buffer = Buffer.alloc(8);
@@ -239,6 +381,7 @@ function writeMemoryBE(handle: number, address: number, value: number | bigint, 
 
     case 'uint64_be':
       if (typeof value !== 'bigint') {
+        // This specific check is redundant due to the check in writeMemory, but good for standalone use.
         throw new Error('UINT64_BE expects type BigInt');
       }
       buffer = Buffer.alloc(8);
@@ -248,6 +391,7 @@ function writeMemoryBE(handle: number, address: number, value: number | bigint, 
     case 'int32_be':
     case 'int_be':
     case 'long_be':
+      if (typeof value !== 'number') throw new Error(`${dataType} expects type number`);
       buffer = Buffer.alloc(4);
       buffer.writeInt32BE(value as number);
       break;
@@ -255,35 +399,46 @@ function writeMemoryBE(handle: number, address: number, value: number | bigint, 
     case 'uint32_be':
     case 'uint_be':
     case 'ulong_be':
+      if (typeof value !== 'number') throw new Error(`${dataType} expects type number`);
       buffer = Buffer.alloc(4);
       buffer.writeUInt32BE(value as number);
       break;
 
     case 'int16_be':
     case 'short_be':
+      if (typeof value !== 'number') throw new Error(`${dataType} expects type number`);
       buffer = Buffer.alloc(2);
       buffer.writeInt16BE(value as number);
       break;
 
     case 'uint16_be':
     case 'ushort_be':
+      if (typeof value !== 'number') throw new Error(`${dataType} expects type number`);
       buffer = Buffer.alloc(2);
       buffer.writeUInt16BE(value as number);
       break;
 
     case 'float_be':
+      if (typeof value !== 'number') throw new Error(`${dataType} expects type number`);
       buffer = Buffer.alloc(4);
       buffer.writeFloatBE(value as number);
       break;
 
     case 'double_be':
+      if (typeof value !== 'number') throw new Error(`${dataType} expects type number`);
       buffer = Buffer.alloc(8);
       buffer.writeDoubleBE(value as number);
       break;
+    default:
+      // This case should ideally not be reached if dataType is validated against a known list.
+      throw new Error(`Unsupported data type for writeMemoryBE: ${dataType}`);
   }
 
+  // buffer null check already exists
   if (buffer == null) {
-    throw new Error('Invalid data type argument!');
+    // This implies an invalid dataType was passed that didn't match any case,
+    // or a new BE type was added to DataType without updating writeMemoryBE.
+    throw new Error('Internal error: Buffer not allocated for writeMemoryBE, possibly invalid data type.');
   }
 
   writeBuffer(handle, address, buffer as Buffer);
@@ -299,19 +454,40 @@ function writeMemoryBE(handle: number, address: number, value: number | bigint, 
  * @returns Whether the operation was successful.
  */
 function writeBuffer(handle: number, address: number, buffer: Buffer<ArrayBufferLike>) {
+  if (typeof handle !== 'number' || handle < 0) {
+    throw new Error('Invalid handle: must be a non-negative number.');
+  }
+  if (typeof address !== 'number' || address < 0) {
+    throw new Error('Invalid address: must be a non-negative number.');
+  }
+  if (!(buffer instanceof Buffer)) {
+    throw new Error('Invalid buffer: argument must be a Buffer instance.');
+  }
   return memoryprocess.writeBuffer(handle, address, buffer);
 }
 
 // TODO: Implement pattern scanning functionality with various overloads to match the C++ implementation
 function findPattern(...args: any[]): any {
-  const pattern           = ['number', 'string', 'number', 'number'].toString();
-  const patternByModule   = ['number', 'string', 'string', 'number', 'number'].toString();
-  const patternByAddress  = ['number', 'number', 'string', 'number', 'number'].toString();
+  const pattern           = ['number', 'string', 'number', 'number'].toString(); // handle, pattern, protection, patternOffset
+  const patternByModule   = ['number', 'string', 'string', 'number', 'number'].toString(); // handle, moduleName, pattern, protection, patternOffset
+  const patternByAddress  = ['number', 'number', 'string', 'number', 'number'].toString(); // handle, address, pattern, protection, patternOffset
 
   const types = args.map(arg => typeof arg);
 
+  // Validate common handle argument
+  if (typeof args[0] !== 'number' || args[0] < 0) {
+    throw new Error('Invalid handle: must be a non-negative number.');
+  }
+
   if (types.slice(0, 4).toString() === pattern) {
     if (types.length === 4 || (types.length === 5 && types[4] === 'function')) {
+      // args[0] is handle - already checked
+      // args[1] is pattern string
+      if (typeof args[1] !== 'string' || !args[1]) throw new Error('Pattern string cannot be empty.');
+      // args[2] is protection (number) - could add range check if known
+      if (typeof args[2] !== 'number') throw new Error('Protection must be a number.');
+      // args[3] is patternOffset (number) - could add range check if known (e.g. non-negative)
+      if (typeof args[3] !== 'number') throw new Error('Pattern offset must be a number.');
       // @ts-ignore
       return memoryprocess.findPattern(...args);
     }
@@ -319,6 +495,15 @@ function findPattern(...args: any[]): any {
 
   if (types.slice(0, 5).toString() === patternByModule) {
     if (types.length === 5 || (types.length === 6 && types[5] === 'function')) {
+      // args[0] is handle - already checked
+      // args[1] is moduleName string
+      if (typeof args[1] !== 'string' || !args[1]) throw new Error('Module name cannot be empty.');
+      // args[2] is pattern string
+      if (typeof args[2] !== 'string' || !args[2]) throw new Error('Pattern string cannot be empty.');
+      // args[3] is protection (number)
+      if (typeof args[3] !== 'number') throw new Error('Protection must be a number.');
+      // args[4] is patternOffset (number)
+      if (typeof args[4] !== 'number') throw new Error('Pattern offset must be a number.');
       // @ts-ignore
       return memoryprocess.findPatternByModule(...args);
     }
@@ -326,12 +511,21 @@ function findPattern(...args: any[]): any {
 
   if (types.slice(0, 5).toString() === patternByAddress) {
     if (types.length === 5 || (types.length === 6 && types[5] === 'function')) {
+      // args[0] is handle - already checked
+      // args[1] is address (number)
+      if (typeof args[1] !== 'number' || args[1] < 0) throw new Error('Invalid address: must be a non-negative number.');
+      // args[2] is pattern string
+      if (typeof args[2] !== 'string' || !args[2]) throw new Error('Pattern string cannot be empty.');
+      // args[3] is protection (number)
+      if (typeof args[3] !== 'number') throw new Error('Protection must be a number.');
+      // args[4] is patternOffset (number)
+      if (typeof args[4] !== 'number') throw new Error('Pattern offset must be a number.');
       // @ts-ignore
       return memoryprocess.findPatternByAddress(...args);
     }
   }
 
-  throw new Error('invalid arguments!');
+  throw new Error('Invalid arguments for findPattern: No matching signature found or argument count mismatch.');
 }
 
 /**
@@ -345,6 +539,21 @@ function findPattern(...args: any[]): any {
  * @returns The return value of the function or undefined if the operation failed.
  */
 function callFunction(handle: number, args: any[], returnType: number, address: number, callback: ((errorMessage: string, info: { returnValue: any; exitCode: number; }) => void) | undefined) {
+  if (typeof handle !== 'number' || handle < 0) {
+    throw new Error('Invalid handle: must be a non-negative number.');
+  }
+  if (!Array.isArray(args)) {
+    throw new Error('Invalid args: must be an array.');
+  }
+  if (typeof returnType !== 'number') {
+    // Assuming returnType is an enum represented by numbers.
+    throw new Error('Invalid returnType: must be a number.');
+  }
+  if (typeof address !== 'number' || address <= 0) {
+    // Function addresses are typically positive, non-zero.
+    throw new Error('Invalid address: must be a positive number.');
+  }
+
   if (arguments.length === 4) {
     return memoryprocess.callFunction(handle, args, returnType, address);
   }
@@ -371,6 +580,22 @@ function virtualAllocEx(
   protection: keyof typeof MemoryAccessFlags,
   callback?: (errorMessage: string, baseAddress: number) => void
 ) {
+  if (typeof handle !== 'number' || handle < 0) {
+    throw new Error('Invalid handle: must be a non-negative number.');
+  }
+  if (address !== null && (typeof address !== 'number' || address < 0)) {
+    throw new Error('Invalid address: must be null or a non-negative number.');
+  }
+  if (typeof size !== 'number' || size <= 0) {
+    throw new Error('Invalid size: must be a positive number.');
+  }
+  if (!MemoryAllocationFlags.hasOwnProperty(allocationType)) {
+    throw new Error(`Invalid allocationType: '${allocationType}'. Must be a key of MemoryAllocationFlags.`);
+  }
+  if (!MemoryAccessFlags.hasOwnProperty(protection)) {
+    throw new Error(`Invalid protection: '${protection}'. Must be a key of MemoryAccessFlags.`);
+  }
+
   const allocCode = MemoryAllocationFlags[allocationType];
   const protCode  = MemoryAccessFlags[protection];
   if (arguments.length === 5) {
@@ -396,6 +621,19 @@ function virtualProtectEx(
   protection: keyof typeof MemoryAccessFlags,
   callback?: (errorMessage: string, oldProtection: Protection) => void
 ) {
+  if (typeof handle !== 'number' || handle < 0) {
+    throw new Error('Invalid handle: must be a non-negative number.');
+  }
+  if (typeof address !== 'number' || address < 0) {
+    throw new Error('Invalid address: must be a non-negative number.');
+  }
+  if (typeof size !== 'number' || size <= 0) {
+    throw new Error('Invalid size: must be a positive number.');
+  }
+  if (!MemoryAccessFlags.hasOwnProperty(protection)) {
+    throw new Error(`Invalid protection: '${protection}'. Must be a key of MemoryAccessFlags.`);
+  }
+
   const protCode = MemoryAccessFlags[protection];
   
   if (arguments.length === 4) {
@@ -421,8 +659,30 @@ function mapViewOfFile(
   viewSize: number,
   pageProtection: keyof typeof MemoryPageFlags
 ) {
+  if (typeof handle !== 'number' || handle < 0) {
+    throw new Error('Invalid handle: must be a non-negative number.');
+  }
+  if (typeof fileHandle !== 'number' || fileHandle < 0) {
+    // Assuming file handles are also non-negative, adjust if OS specific values are different
+    throw new Error('Invalid fileHandle: must be a non-negative number.');
+  }
+  if (typeof offset !== 'number' || offset < 0) {
+    throw new Error('Invalid offset: must be a non-negative number.');
+  }
+  if (typeof viewSize !== 'number' || viewSize < 0) {
+    // A viewSize of 0 might be valid to map the entire file, so using '< 0'
+    throw new Error('Invalid viewSize: must be a non-negative number.');
+  }
+  if (!MemoryPageFlags.hasOwnProperty(pageProtection)) {
+    throw new Error(`Invalid pageProtection: '${pageProtection}'. Must be a key of MemoryPageFlags.`);
+  }
+
   const pageCode = MemoryPageFlags[pageProtection];
-  if (arguments.length === 2) {
+  if (arguments.length === 2) { // This condition seems problematic given 5 declared args.
+                               // Assuming it's meant to provide defaults if offset, viewSize are not passed.
+                               // However, TS won't allow calling with 2 args if 5 are declared without defaults.
+                               // For validation, we assume all declared args are passed.
+                               // If this function is truly callable with 2 args, its signature needs adjustment.
     return memoryprocess.mapViewOfFile(handle, fileHandle, 0, 0, pageCode);
   }
   return memoryprocess.mapViewOfFile(handle, fileHandle, offset, viewSize, pageCode);
@@ -436,6 +696,10 @@ function mapViewOfFile(
  * @returns An array of memory regions or undefined if the operation failed.
  */
 function getRegions(handle: number, callback: ((regions: any[], errorMessage: string) => void) | undefined) {
+  if (typeof handle !== 'number' || handle < 0) {
+    throw new Error('Invalid handle: must be a non-negative number.');
+  }
+
   if (arguments.length === 1) {
     return memoryprocess.getRegions(handle);
   }
@@ -452,6 +716,13 @@ function getRegions(handle: number, callback: ((regions: any[], errorMessage: st
  * @returns The memory region information or undefined if the operation failed.
  */
 function virtualQueryEx(handle: number, address: number, callback: ((region: any, errorMessage: string) => void) | undefined) {
+  if (typeof handle !== 'number' || handle < 0) {
+    throw new Error('Invalid handle: must be a non-negative number.');
+  }
+  if (typeof address !== 'number' || address < 0) {
+    throw new Error('Invalid address: must be a non-negative number.');
+  }
+
   if (arguments.length === 2) {
     return memoryprocess.virtualQueryEx(handle, address);
   }
@@ -468,12 +739,21 @@ function virtualQueryEx(handle: number, address: number, callback: ((region: any
  * @returns Whether the operation was successful.
  */
 function injectDll(handle: number, dllPath: PathLike, callback: ((errorMessage: string, success: boolean) => void) | undefined) {
-  if (!dllPath.toString().endsWith('.dll')) {
-    throw new Error("Given path is invalid: file is not of type 'dll'.");
+  if (typeof handle !== 'number' || handle < 0) {
+    throw new Error('Invalid handle: must be a non-negative number.');
+  }
+  if (!dllPath || typeof dllPath.toString !== 'function') {
+    throw new Error('Invalid dllPath: must be a PathLike object (e.g., string).');
   }
 
-  if (existsSync(dllPath)) {
-    throw new Error('Given path is invaild: file does not exist.');
+  const dllPathStr = dllPath.toString();
+  if (!dllPathStr.endsWith('.dll')) {
+    throw new Error("Invalid dllPath: file is not of type '.dll'. Path: " + dllPathStr);
+  }
+
+  // Corrected logic: throw error if file DOES NOT exist
+  if (!existsSync(dllPath)) {
+    throw new Error('Invalid dllPath: file does not exist. Path: ' + dllPathStr);
   }
 
   if (arguments.length === 2) {
@@ -492,6 +772,21 @@ function injectDll(handle: number, dllPath: PathLike, callback: ((errorMessage: 
   * @returns Whether the operation was successful.
   */
 function unloadDll(handle: number, module: string | number, callback: ((errorMessage: string, success: boolean) => void) | undefined) {
+  if (typeof handle !== 'number' || handle < 0) {
+    throw new Error('Invalid handle: must be a non-negative number.');
+  }
+  if (module === null || module === undefined) {
+    throw new Error('Invalid module: cannot be null or undefined.');
+  }
+  if (typeof module === 'string' && module.trim() === '') {
+    throw new Error('Invalid module: module name cannot be an empty string.');
+  }
+  if (typeof module === 'number' && module < 0) {
+    // Assuming module base addresses or IDs are non-negative
+    throw new Error('Invalid module: module identifier cannot be negative if a number.');
+  }
+
+
   if (arguments.length === 2) {
     return memoryprocess.unloadDll(handle, module);
   }
@@ -506,9 +801,10 @@ function unloadDll(handle: number, module: string | number, callback: ((errorMes
  * @returns The handle of the opened file mapping object or undefined if the operation failed.
  */
 function openFileMapping(fileName: string) {
-  if (arguments.length !== 1 || typeof fileName !== 'string') {
-    throw new Error('invalid arguments!');
+  if (typeof fileName !== 'string' || fileName.trim() === '') {
+    throw new Error('Invalid fileName: must be a non-empty string.');
   }
+  // arguments.length check is implicitly handled by TypeScript signature if no optional args
 
   return memoryprocess.openFileMapping(fileName);
 }
@@ -533,6 +829,7 @@ const library = {
   unloadDll,
   openFileMapping,
   mapViewOfFile,
+  findPatternInRegion, // Added new function
   attachDebugger: memoryprocess.attachDebugger,
   detachDebugger: memoryprocess.detachDebugger,
   awaitDebugEvent: memoryprocess.awaitDebugEvent,
@@ -542,7 +839,27 @@ const library = {
   Debugger: new Debugger(memoryprocess),
 };
 
+/**
+ * Retrieves a list of threads running in the specified process.
+ *
+ * @param processId - The identifier of the process.
+ * @returns An array of ThreadEntry objects, each describing a thread.
+ * @throws Will throw an error if the processId is invalid or if the native call fails.
+ */
+function getThreads(processId: number): ThreadEntry[] {
+  if (typeof processId !== 'number' || processId <= 0) {
+    // Process IDs are typically positive integers. 0 might refer to System Idle Process
+    // but module::getThreads already handles 0 as an error.
+    throw new Error('Invalid processId: must be a positive number.');
+  }
+  // The N-API function getThreadsApi is expected to be synchronous if no callback is passed.
+  // If it were designed to always expect a callback, this TS wrapper would need to change
+  // to return a Promise or accept a callback itself.
+  return memoryprocess.getThreads(processId);
+}
+
 export default {
   ...library,
+  getThreads, // Add getThreads to the default export
   STRUCTRON_TYPE_STRING: STRUCTRON_TYPE_STRING(library),
 };

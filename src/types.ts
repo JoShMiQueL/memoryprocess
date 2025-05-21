@@ -173,3 +173,22 @@ T extends 'string' | 'str' ? string :
 T extends 'vector3' | 'vec3' ? { x: number; y: number; z: number } :
 T extends 'vector4' | 'vec4' ? { x: number; y: number; z: number; w: number } :
 number;
+
+/**
+ * Represents information about a single thread in a process.
+ */
+export interface ThreadEntry {
+  /**
+   * Thread identifier (TID).
+   */
+  threadId: number;
+  /**
+   * Process identifier (PID) of the process that created the thread.
+   * This should match the processId used to query the threads.
+   */
+  ownerProcessId: number;
+  /**
+   * Base priority level assigned to the thread.
+   */
+  basePriority: number;
+}
