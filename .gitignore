@@ -1,11 +1,11 @@
-node_modules
-lib
-build
-.vscode
-.vs
-.windsurfrules
-bun.lock*
-
-# Logs
+node_modules/
+build/
+dist/
 *.log
-npm-debug.log*
+.DS_Store
+
+# prebuilt binaries ARE committed (consumers don't compile)
+!prebuilds/**/*.node
+
+*.tgz
+src/*.node

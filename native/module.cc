@@ -1,93 +1,177 @@
-#include <windows.h>
-#include <TlHelp32.h>
-#include <vector>
 #include "module.h"
-#include "process.h"
-#include "memoryprocess.h"
+#include "memory.h"
+#include <system_error>
 
-DWORD64 module::getBaseAddress(const char* processName, DWORD processId) {
-  const char* errorMessage = "";
-  MODULEENTRY32 baseModule = module::findModule(processName, processId, &errorMessage);
-  return (DWORD64)baseModule.modBaseAddr; 
+namespace mp {
+
+static Napi::Object ErrToJs(Napi::Env env, const std::system_error& e) {
+  auto obj = Napi::Object::New(env);
+  obj.Set("code", Napi::Number::New(env, e.code().value()));
+  obj.Set("message", Napi::String::New(env, e.what()));
+  obj.Set("win32", Napi::Boolean::New(env, true));
+  return obj;
 }
 
-MODULEENTRY32 module::findModule(const char* moduleName, DWORD processId, const char** errorMessage) {
-  MODULEENTRY32 module;
-  bool found = false;
+Napi::Value OpenProcessSync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 1) { Napi::TypeError::New(env, "expected (nameOrPid[, access])").ThrowAsJavaScriptException(); return env.Null(); }
 
-  std::vector<MODULEENTRY32> moduleEntries = getModules(processId, errorMessage);
+  DWORD access = PROCESS_ALL_ACCESS;
+  if (info.Length() > 1 && info[1].IsNumber()) access = info[1].As<Napi::Number>().Uint32Value();
 
-  // Loop over every module
-  for (std::vector<MODULEENTRY32>::size_type i = 0; i != moduleEntries.size(); i++) {
-    // Check to see if this is the module we want.
-    if (!strcmp(moduleEntries[i].szModule, moduleName)) {
-      // module is returned and moduleEntry is used internally for reading/writing to memory
-      module = moduleEntries[i];
-      found = true;
-      break;
+  DWORD pid = 0;
+  if (info[0].IsNumber()) {
+    pid = info[0].As<Napi::Number>().Uint32Value();
+  } else if (info[0].IsString()) {
+    pid = PidFromName(info[0].As<Napi::String>().Utf8Value());
+    if (!pid) {
+      auto e = Napi::Error::New(env, "ProcessNotFound");
+      e.Set("code", "PROCESS_NOT_FOUND");
+      e.ThrowAsJavaScriptException();
+      return env.Null();
     }
+  } else {
+    Napi::TypeError::New(env, "nameOrPid must be string|number").ThrowAsJavaScriptException();
+    return env.Null();
   }
 
-  if (!found) {
-    *errorMessage = "unable to find module";
+  try {
+    HANDLE h = OpenByPid(pid, access);
+    auto res = Napi::Object::New(env);
+    res.Set("handle", Napi::Number::New(env, static_cast<double>(reinterpret_cast<std::uintptr_t>(h))));
+    res.Set("pid", Napi::Number::New(env, pid));
+    return res;
+  } catch (const std::system_error& e) {
+    auto err = Napi::Error::New(env, e.what());
+    err.Set("code", e.code().value() == 5 ? "ACCESS_DENIED" : "OPEN_FAILED");
+    err.Set("win32code", Napi::Number::New(env, static_cast<double>(e.code().value())));
+    err.ThrowAsJavaScriptException();
+    return env.Null();
   }
-
-  return module;
-} 
-
-std::vector<MODULEENTRY32> module::getModules(DWORD processId, const char** errorMessage) {
-  // Take a snapshot of all modules inside a given process.
-  HANDLE hModuleSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, processId);
-  MODULEENTRY32 mEntry;
-
-  if (hModuleSnapshot == INVALID_HANDLE_VALUE) {
-    *errorMessage = "method failed to take snapshot of the modules";
-  }
-
-  // Before use, set the structure size.
-  mEntry.dwSize = sizeof(mEntry);
-
-  // Exit if unable to find the first module.
-  if (!Module32First(hModuleSnapshot, &mEntry)) {
-    CloseHandle(hModuleSnapshot);
-    *errorMessage = "method failed to retrieve the first module";
-  }
-
-  std::vector<MODULEENTRY32> modules;
-
-  // Loop through modules.
-  do {
-    // Add the module to the vector
-    modules.push_back(mEntry);
-  } while (Module32Next(hModuleSnapshot, &mEntry));
-
-  CloseHandle(hModuleSnapshot);
-
-  return modules;
 }
 
-std::vector<THREADENTRY32> module::getThreads(DWORD processId, const char** errorMessage) {
-  HANDLE hThreadSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, processId);
-  THREADENTRY32 mEntry;
-
-  if (hThreadSnapshot == INVALID_HANDLE_VALUE) {
-    *errorMessage = "method failed to take snapshot of the threads";
-  }
-
-  mEntry.dwSize = sizeof(mEntry);
-
-  if(!Thread32First(hThreadSnapshot, &mEntry)) {
-    CloseHandle(hThreadSnapshot);
-    *errorMessage = "method failed to retrieve the first thread";
-  }
-
-  std::vector<THREADENTRY32> threads;
-
-  do {
-    threads.push_back(mEntry);
-  } while (Thread32Next(hThreadSnapshot, &mEntry));
-
-  CloseHandle(hThreadSnapshot);
-
-  return threads;
+Napi::Value CloseHandleSync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 1 || !info[0].IsNumber()) { Napi::TypeError::New(env, "expected handle").ThrowAsJavaScriptException(); return env.Null(); }
+  HANDLE h = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(info[0].As<Napi::Number>().DoubleValue()));
+  return Napi::Boolean::New(env, CloseHandle(h) != 0);
 }
+
+Napi::Value ListProcessesSync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  auto list = ListProcesses();
+  auto arr = Napi::Array::New(env, list.size());
+  for (size_t i = 0; i < list.size(); i++) {
+    auto o = Napi::Object::New(env);
+    o.Set("pid", Napi::Number::New(env, static_cast<double>(list[i].pid)));
+    o.Set("name", list[i].name);
+    arr.Set(i, o);
+  }
+  return arr;
+}
+
+Napi::Value GetModulesSync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 2 || !info[0].IsNumber() || !info[1].IsNumber()) { Napi::TypeError::New(env, "expected (handle,pid)").ThrowAsJavaScriptException(); return env.Null(); }
+  HANDLE h = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(info[0].As<Napi::Number>().DoubleValue()));
+  DWORD pid = info[1].As<Napi::Number>().Uint32Value();
+  auto mods = GetModules(h, pid);
+  auto arr = Napi::Array::New(env, mods.size());
+  for (size_t i = 0; i < mods.size(); i++) {
+    auto o = Napi::Object::New(env);
+    o.Set("base", Napi::Number::New(env, static_cast<double>(mods[i].base)));
+    o.Set("size", Napi::Number::New(env, static_cast<double>(mods[i].size)));
+    o.Set("path", mods[i].path);
+    arr.Set(i, o);
+  }
+  return arr;
+}
+
+Napi::Value GetRegionsSync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 1 || !info[0].IsNumber()) { Napi::TypeError::New(env, "expected handle").ThrowAsJavaScriptException(); return env.Null(); }
+  HANDLE h = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(info[0].As<Napi::Number>().DoubleValue()));
+  auto regs = GetRegions(h);
+  auto arr = Napi::Array::New(env, regs.size());
+  for (size_t i = 0; i < regs.size(); i++) {
+    auto o = Napi::Object::New(env);
+    o.Set("baseAddress", Napi::Number::New(env, static_cast<double>(regs[i].baseAddress)));
+    o.Set("size", Napi::Number::New(env, static_cast<double>(regs[i].size)));
+    o.Set("protection", Napi::Number::New(env, static_cast<double>(regs[i].protection)));
+    o.Set("type", Napi::Number::New(env, static_cast<double>(regs[i].type)));
+    arr.Set(i, o);
+  }
+  return arr;
+}
+
+Napi::Value ReadBufferSync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 3) { Napi::TypeError::New(env, "expected (handle,address,size)").ThrowAsJavaScriptException(); return env.Null(); }
+  HANDLE h = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(info[0].As<Napi::Number>().DoubleValue()));
+  auto addr = static_cast<std::uintptr_t>(info[1].As<Napi::Number>().DoubleValue());
+  auto size = static_cast<std::size_t>(info[2].As<Napi::Number>().DoubleValue());
+  try {
+    auto bytes = ReadBytes(h, addr, size);
+    return Napi::Buffer<std::uint8_t>::Copy(env, bytes.data(), bytes.size());
+  } catch (const std::system_error& e) {
+    auto err = Napi::Error::New(env, e.what());
+    err.Set("code", "READ_FAILED");
+    err.Set("win32code", Napi::Number::New(env, static_cast<double>(e.code().value())));
+    err.ThrowAsJavaScriptException();
+    return env.Null();
+  }
+}
+
+// readValue(handle, address, type) where type in:
+// "int32","uint32","int64","uint64","float","double","pointer"
+Napi::Value ReadValueSync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 3) { Napi::TypeError::New(env, "expected (handle,address,type)").ThrowAsJavaScriptException(); return env.Null(); }
+  HANDLE h = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(info[0].As<Napi::Number>().DoubleValue()));
+  auto addr = static_cast<std::uintptr_t>(info[1].As<Napi::Number>().DoubleValue());
+  std::string type = info[2].As<Napi::String>().Utf8Value();
+  try {
+    if (type == "int32") return Napi::Number::New(env, ReadValue<std::int32_t>(h, addr));
+    if (type == "uint32") return Napi::Number::New(env, ReadValue<std::uint32_t>(h, addr));
+    if (type == "int64") return Napi::BigInt::New(env, ReadValue<std::int64_t>(h, addr));
+    if (type == "uint64") return Napi::BigInt::New(env, ReadValue<std::uint64_t>(h, addr));
+    if (type == "float") return Napi::Number::New(env, ReadValue<float>(h, addr));
+    if (type == "double") return Napi::Number::New(env, ReadValue<double>(h, addr));
+    if (type == "pointer") return Napi::BigInt::New(env, static_cast<std::uint64_t>(ReadValue<std::uintptr_t>(h, addr)));
+    Napi::TypeError::New(env, "unknown type " + type).ThrowAsJavaScriptException();
+    return env.Null();
+  } catch (const std::system_error& e) {
+    auto err = Napi::Error::New(env, e.what());
+    err.Set("code", "READ_FAILED");
+    err.Set("win32code", Napi::Number::New(env, static_cast<double>(e.code().value())));
+    err.ThrowAsJavaScriptException();
+    return env.Null();
+  }
+}
+
+Napi::Value WriteValueSync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 4) { Napi::TypeError::New(env, "expected (handle,address,type,value)").ThrowAsJavaScriptException(); return env.Null(); }
+  HANDLE h = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(info[0].As<Napi::Number>().DoubleValue()));
+  auto addr = static_cast<std::uintptr_t>(info[1].As<Napi::Number>().DoubleValue());
+  std::string type = info[2].As<Napi::String>().Utf8Value();
+  bool ok = false;
+  try {
+    if (type == "int32") ok = WriteValue<std::int32_t>(h, addr, info[3].As<Napi::Number>().Int32Value());
+    else if (type == "uint32") ok = WriteValue<std::uint32_t>(h, addr, info[3].As<Napi::Number>().Uint32Value());
+    else if (type == "float") ok = WriteValue<float>(h, addr, info[3].As<Napi::Number>().FloatValue());
+    else if (type == "double") ok = WriteValue<double>(h, addr, info[3].As<Napi::Number>().DoubleValue());
+    else if (type == "int64") { bool ls; ok = WriteValue<std::int64_t>(h, addr, info[3].As<Napi::BigInt>().Int64Value(&ls)); }
+    else if (type == "uint64") { bool ls; ok = WriteValue<std::uint64_t>(h, addr, info[3].As<Napi::BigInt>().Uint64Value(&ls)); }
+    else if (type == "pointer") { bool ls; ok = WriteValue<std::uintptr_t>(h, addr, static_cast<std::uintptr_t>(info[3].As<Napi::BigInt>().Uint64Value(&ls))); }
+    else { Napi::TypeError::New(env, "unknown type " + type).ThrowAsJavaScriptException(); return env.Null(); }
+    return Napi::Boolean::New(env, ok);
+  } catch (...) {
+    auto err = Napi::Error::New(env, "WriteProcessMemory failed");
+    err.Set("code", "WRITE_FAILED");
+    err.ThrowAsJavaScriptException();
+    return env.Null();
+  }
+}
+
+} // namespace mp

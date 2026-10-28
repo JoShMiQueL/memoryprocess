@@ -1,95 +1,105 @@
-#include <node.h>
-#include <windows.h>
-#include <TlHelp32.h>
-#include <vector>
 #include "process.h"
-#include "memoryprocess.h"
+#include <tlhelp32.h>
+#include <psapi.h>
+#include <system_error>
 
-process::process() {}
-process::~process() {}
+namespace mp {
 
-using v8::Exception;
-using v8::Isolate;
-using v8::String;
+static DWORD LastErr() { return GetLastError(); }
 
-process::Pair process::openProcess(const char* processName, const char** errorMessage){
-  PROCESSENTRY32 process;
-  HANDLE handle = NULL;
+HANDLE OpenByPid(DWORD pid, DWORD access) {
+  HANDLE h = OpenProcess(access, FALSE, pid);
+  if (!h) throw std::system_error(static_cast<int>(LastErr()), std::system_category(), "OpenProcess");
+  return h;
+}
 
-  // A list of processes (PROCESSENTRY32)
-  std::vector<PROCESSENTRY32> processes = getProcesses(errorMessage);
+DWORD PidFromName(const std::string& name) {
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snap == INVALID_HANDLE_VALUE) return 0;
+  PROCESSENTRY32W pe{};
+  pe.dwSize = sizeof(pe);
+  // case-insensitive wide compare
+  std::wstring want(name.begin(), name.end());
+  for (wchar_t& c : want) c = towlower(c);
+  DWORD found = 0;
+  if (Process32FirstW(snap, &pe)) {
+    do {
+      std::wstring cur(pe.szExeFile);
+      for (wchar_t& c : cur) c = towlower(c);
+      if (cur == want) { found = pe.th32ProcessID; break; }
+    } while (Process32NextW(snap, &pe));
+  }
+  CloseHandle(snap);
+  return found;
+}
 
-  for (std::vector<PROCESSENTRY32>::size_type i = 0; i != processes.size(); i++) {
-    // Check to see if this is the process we want.
-    if (!strcmp(processes[i].szExeFile, processName)) {
-      handle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, processes[i].th32ProcessID);
-      process = processes[i];
-      break;
+std::vector<ProcInfo> ListProcesses() {
+  std::vector<ProcInfo> out;
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snap == INVALID_HANDLE_VALUE) return out;
+  PROCESSENTRY32W pe{};
+  pe.dwSize = sizeof(pe);
+  if (Process32FirstW(snap, &pe)) {
+    do {
+      char name[MAX_PATH];
+      size_t n = 0;
+      wcstombs_s(&n, name, pe.szExeFile, sizeof(name) - 1);
+      out.push_back({ pe.th32ProcessID, std::string(name) });
+    } while (Process32NextW(snap, &pe));
+  }
+  CloseHandle(snap);
+  return out;
+}
+
+std::vector<ModuleInfo> GetModules(HANDLE proc, DWORD /*pid*/) {
+  std::vector<ModuleInfo> out;
+  HMODULE mods[1024];
+  DWORD needed = 0;
+  if (!EnumProcessModulesEx(proc, mods, sizeof(mods), &needed, LIST_MODULES_ALL)) return out;
+  DWORD count = needed / sizeof(HMODULE);
+  for (DWORD i = 0; i < count; i++) {
+    MODULEINFO mi{};
+    if (!GetModuleInformation(proc, mods[i], &mi, sizeof(mi))) continue;
+    wchar_t path[MAX_PATH];
+    if (!GetModuleFileNameExW(proc, mods[i], path, MAX_PATH)) continue;
+    char utf8[MAX_PATH * 2];
+    size_t n = 0;
+    wcstombs_s(&n, utf8, path, sizeof(utf8) - 1);
+    // base filename
+    std::string p(utf8);
+    out.push_back({ reinterpret_cast<std::uintptr_t>(mi.lpBaseOfDll), static_cast<std::uint32_t>(mi.SizeOfImage), p });
+  }
+  return out;
+}
+
+ModuleInfo GetModule(HANDLE proc, DWORD pid, const std::string& name) {
+  auto mods = GetModules(proc, pid);
+  std::string want = name;
+  for (auto& c : want) c = static_cast<char>(tolower(c));
+  for (auto& m : mods) {
+    std::string base = m.path.substr(m.path.find_last_of("\\/") + 1);
+    for (auto& c : base) c = static_cast<char>(tolower(c));
+    if (base == want) return m;
+  }
+  return {};
+}
+
+std::vector<RegionInfo> GetRegions(HANDLE proc) {
+  std::vector<RegionInfo> out;
+  MEMORY_BASIC_INFORMATION mbi{};
+  std::uintptr_t addr = 0;
+  const std::uintptr_t max = 0x7FFFFFFFFFFFULL;
+  while (addr < max && VirtualQueryEx(proc, reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi))) {
+    if (mbi.State == MEM_COMMIT) {
+      out.push_back({ reinterpret_cast<std::uintptr_t>(mbi.BaseAddress),
+                      static_cast<std::size_t>(mbi.RegionSize),
+                      static_cast<std::uint32_t>(mbi.Protect),
+                      static_cast<std::uint32_t>(mbi.Type) });
     }
+    addr = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+    if (mbi.RegionSize == 0) break;
   }
-
-  if (handle == NULL) {
-    *errorMessage = "unable to find process";
-  }
-
-  return {
-    handle,
-    process,
-  };
+  return out;
 }
 
-process::Pair process::openProcess(DWORD processId, const char** errorMessage) {
-  PROCESSENTRY32 process;
-  HANDLE handle = NULL;
-
-  // A list of processes (PROCESSENTRY32)
-  std::vector<PROCESSENTRY32> processes = getProcesses(errorMessage);
-
-  for (std::vector<PROCESSENTRY32>::size_type i = 0; i != processes.size(); i++) {
-    // Check to see if this is the process we want.
-    if (processId == processes[i].th32ProcessID) {
-      handle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, processes[i].th32ProcessID);
-      process = processes[i];
-      break;
-    }
-  }
-
-  if (handle == NULL) {
-    *errorMessage = "unable to find process";
-  }
-
-  return {
-    handle,
-    process,
-  };
-}
-
-std::vector<PROCESSENTRY32> process::getProcesses(const char** errorMessage) {
-  // Take a snapshot of all processes.
-  HANDLE hProcessSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, NULL);
-  PROCESSENTRY32 pEntry;
-
-  if (hProcessSnapshot == INVALID_HANDLE_VALUE) {
-    *errorMessage = "method failed to take snapshot of the process";
-  }
-
-  // Before use, set the structure size.
-  pEntry.dwSize = sizeof(pEntry);
-
-  // Exit if unable to find the first process.
-  if (!Process32First(hProcessSnapshot, &pEntry)) {
-    CloseHandle(hProcessSnapshot);
-    *errorMessage = "method failed to retrieve the first process";
-  }
-
-  std::vector<PROCESSENTRY32> processes;
-
-  // Loop through processes.
-  do {
-    // Add the process to the vector
-    processes.push_back(pEntry);
-  } while (Process32Next(hProcessSnapshot, &pEntry));
-
-  CloseHandle(hProcessSnapshot);
-  return processes;
-}
+} // namespace mp

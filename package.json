@@ -1,53 +1,69 @@
 {
   "name": "memoryprocess",
-  "version": "1.0.0",
-  "description": "Maintained fork of memoryjs with critical fixes.",
-  "main": "lib/index.js",
-  "types": "lib/index.d.ts",
+  "version": "2.0.0-dev.0",
+  "description": "Read and write Windows process memory from Node.js / Bun. N-API native addon.",
   "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "prebuilds",
+    "binding.gyp",
+    "native"
+  ],
+  "os": ["win32"],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
-    "build": "bun run scripts/build.ts",
-    "check": "biome check --write"
+    "clean": "node scripts/clean.mjs",
+    "build": "node scripts/build.mjs",
+    "build:victim": "node scripts/build-victim.mjs",
+    "prebuild": "prebuildify --all --napi",
+    "lint": "bun lint --type-aware",
+    "format": "bun fmt",
+    "check": "bun check",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "test:node": "node --test tests/compat/",
+    "prepublishOnly": "npm run build && npm run prebuild"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/joshmiquel/memoryprocess.git"
+    "url": "git+https://github.com/JoShMiQueL/memoryprocess.git"
   },
   "keywords": [
     "memory",
-    "reading",
-    "writing",
-    "management",
-    "addon"
+    "process",
+    "read",
+    "write",
+    "windows",
+    "native",
+    "addon",
+    "napi",
+    "pattern-scan",
+    "game-hacking"
   ],
   "author": "JoShMiQueL",
   "license": "MIT",
-  "packageManager": "bun@1.2.10",
-  "bugs": {
-    "url": "https://github.com/joshmiquel/memoryprocess/issues"
-  },
-  "homepage": "https://github.com/joshmiquel/memoryprocess#readme",
   "dependencies": {
-    "node-addon-api": "8.3.1"
+    "node-addon-api": "8.3.1",
+    "node-gyp-build": "4.8.4"
   },
   "devDependencies": {
-    "@biomejs/biome": "1.9.4",
-    "@commitlint/cli": "19.8.0",
-    "@commitlint/config-conventional": "19.8.0",
-    "@microsoft/api-extractor": "7.52.8",
-    "@semantic-release/commit-analyzer": "13.0.1",
-    "@semantic-release/git": "10.0.1",
-    "@semantic-release/github": "11.0.2",
-    "@semantic-release/npm": "12.0.1",
-    "@semantic-release/release-notes-generator": "14.0.3",
-    "@total-typescript/tsconfig": "1.0.4",
-    "@types/bun": "1.2.13",
-    "@types/node": "22.15.20",
-    "lefthook": "1.11.13",
-    "typescript": "5.8.3"
+    "@types/node": "24.19.2",
+    "node-gyp": "12.4.0",
+    "prebuildify": "6.0.1",
+    "tsdown": "0.23.3",
+    "typescript": "7.0.2"
   },
   "trustedDependencies": [
-    "@biomejs/biome",
-    "lefthook"
+    "node-gyp-build"
   ]
 }

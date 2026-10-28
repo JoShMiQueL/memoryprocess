@@ -1,27 +1,36 @@
 #pragma once
-#ifndef PROCESS_H
-#define PROCESS_H
-#define WIN32_LEAN_AND_MEAN
-
+#include <napi.h>
 #include <windows.h>
-#include <TlHelp32.h>
+#include <string>
 #include <vector>
 
-class process {
-public:
-  struct Pair {
-    HANDLE handle;
-    PROCESSENTRY32 process;
-  };
+namespace mp {
 
-  process();
-  ~process();
-
-  Pair openProcess(const char* processName, const char** errorMessage);
-  Pair openProcess(DWORD processId, const char** errorMessage);
-  void closeProcess(HANDLE hProcess);
-  std::vector<PROCESSENTRY32> getProcesses(const char** errorMessage);
+struct ModuleInfo {
+  std::uintptr_t base;
+  std::uint32_t size;
+  std::string path;
 };
 
-#endif
-#pragma once
+struct RegionInfo {
+  std::uintptr_t baseAddress;
+  std::size_t size;
+  std::uint32_t protection;
+  std::uint32_t type;
+};
+
+struct ProcInfo {
+  std::uint32_t pid;
+  std::string name;
+};
+
+// Open a process by pid. Returns handle or throws via SetLastError mapping.
+HANDLE OpenByPid(DWORD pid, DWORD access);
+// Resolve a process name (e.g. "notepad.exe") to pid. 0 if not found.
+DWORD PidFromName(const std::string& name);
+std::vector<ProcInfo> ListProcesses();
+std::vector<ModuleInfo> GetModules(HANDLE proc, DWORD pid);
+ModuleInfo GetModule(HANDLE proc, DWORD pid, const std::string& name);
+std::vector<RegionInfo> GetRegions(HANDLE proc);
+
+} // namespace mp

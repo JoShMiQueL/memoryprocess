@@ -1,17 +1,17 @@
 #pragma once
-#ifndef MODULE_H
-#define MODULE_H
-#define WIN32_LEAN_AND_MEAN
+#include <napi.h>
+#include "process.h"
 
-#include <windows.h>
-#include <TlHelp32.h>
-#include <vector>
+namespace mp {
 
-namespace module {
-  DWORD64 getBaseAddress(const char* processName, DWORD processId);
-  MODULEENTRY32 findModule(const char* moduleName, DWORD processId, const char** errorMessage);
-  std::vector<MODULEENTRY32> getModules(DWORD processId, const char** errorMessage);
-  std::vector<THREADENTRY32> getThreads(DWORD processId, const char** errorMessage);
-};
-#endif
-#pragma once
+Napi::Value OpenProcessSync(const Napi::CallbackInfo& info);
+Napi::Value CloseHandleSync(const Napi::CallbackInfo& info);
+Napi::Value ListProcessesSync(const Napi::CallbackInfo& info);
+Napi::Value GetModulesSync(const Napi::CallbackInfo& info);
+Napi::Value GetRegionsSync(const Napi::CallbackInfo& info);
+Napi::Value ReadValueSync(const Napi::CallbackInfo& info);
+Napi::Value WriteValueSync(const Napi::CallbackInfo& info);
+Napi::Value ReadBufferSync(const Napi::CallbackInfo& info);
+Napi::Value ScanAsync(const Napi::CallbackInfo& info);
+
+} // namespace mp

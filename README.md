@@ -1,90 +1,139 @@
-<p align="center">
-  <img alt="Banner" src="assets/banner.png">
-  <br>
-  <code>MemoryProcess</code> is an NPM package to read and write process memory
-  <br>
-  This is a fork of the original <a href="https://github.com/Rob--/memoryjs">memoryjs</a> package, maintained by <a href="https://github.com/JoShMiQueL">JoShMiQueL</a>
-</p>
+# memoryprocess
 
-<p align="center">
-  <img alt="GitHub License" src="https://img.shields.io/github/license/JoShMiQueL/memoryprocess">
-  <a href="https://github.com/JoShMiQueL/memoryprocess/actions/workflows/publish-npm.yml" target="_blank">
-    <img alt="GitHub Actions Workflow Status" src="https://img.shields.io/github/actions/workflow/status/JoShMiQueL/memoryprocess/release.yml?branch=master&style=flat&logo=npm&label=Publish%20to%20npm">
-  </a>
-  <a href="https://www.npmjs.com/package/memoryprocess" target="_blank">
-    <img alt="NPM Downloads" src="https://img.shields.io/npm/dy/memoryprocess">
-  </a>
-  <a href="https://www.npmjs.com/package/memoryprocess" target="_blank">
-    <img alt="NPM Version" src="https://img.shields.io/npm/v/memoryprocess">
-  </a>
-</p>
+Read and write **Windows process memory** from Node.js, Bun or Deno. N-API native addon, zero runtime dependencies, prebuilt binaries.
 
----
+> **v2** — complete rewrite. Breaking changes from v1/memoryjs.
 
-## ⚙️ Bundling with Bun
-If you want to bundle your `.ts` code to `.js` using Bun, add `memoryprocess` to the `--external` option when running `bun build`. For example:
+```ts
+import { Process } from 'memoryprocess'
 
-```bash
-bun build src/index.ts --external memoryprocess
+using proc = Process.open('notepad.exe')
+
+const hp = proc.readInt32(baseAddr + 0x10)
+proc.writeFloat(addr, 99.5)
+
+const hits = await proc.scan('48 8B ?? ?? 00', { module: 'game.dll' })
 ```
 
-## 📖 API References (`src`)
+## Install
 
-### Main Functions
+```bash
+npm install memoryprocess   # or: bun add memoryprocess
+```
 
-- **openProcess(processIdentifier: string | number, callback?): Process**  
-  Opens a process by name or ID. Returns the process handle or undefined if not found.
+Prebuilt `.node` binaries ship for `win32-x64` — **no compiler needed**. Falls back to `node-gyp` build from source on other setups (requires MSVC).
 
-- **closeHandle(handle: number): boolean**  
-  Closes a process handle.
+## API
 
-- **getProcesses(callback?): Process[]**  
-  Returns the list of running processes.
+### `Process.open(nameOrPid, access?)`
 
-- **findModule(moduleName: string, processId: number, callback?): Module | undefined**  
-  Finds a module by name in a process.
+Open a process by name (`"notepad.exe"`, case-insensitive) or PID. Returns a `Process`. Throws `ProcessNotFoundError` / `AccessDeniedError`.
 
-- **getModules(processId: number, callback?): Module[]**  
-  Returns the modules loaded by a process.
+```ts
+const proc = Process.open('game.exe')
+// or
+const proc = Process.open(12345)
+```
 
-- **readMemory<T extends DataType>(handle: number, address: number, dataType: T, callback?): MemoryData<T> | undefined**  
-  Reads a value from a process's memory.
+**`using`** support — auto-closes the handle when leaving scope:
 
-- **writeMemory(handle: number, address: number, value: any, dataType: DataType): boolean**  
-  Writes a value to a process's memory.
+```ts
+{
+  using proc = Process.open('game.exe')
+  proc.readInt32(addr)
+} // handle closed here
+```
 
-- **findPattern(...)**  
-  Scans memory patterns (multiple overloads).
+### Reads (synchronous, hot path)
 
-- **callFunction(handle: number, args: any[], returnType: number, address: number, callback?): any**  
-  Calls a function in the process's memory.
+```ts
+proc.readInt32(addr)      // number
+proc.readUInt32(addr)     // number
+proc.readInt64(addr)      // bigint
+proc.readUInt64(addr)     // bigint
+proc.readFloat(addr)      // number
+proc.readDouble(addr)     // number
+proc.readPointer(addr)    // bigint (deref a pointer)
+proc.readBuffer(addr, n)  // Buffer
+proc.readString(addr, max=256) // string (NUL-terminated)
+```
 
-- **Debugger**  
-  Utility class for process debugging. Main methods: `attach`, `detach`, `setHardwareBreakpoint`, `removeHardwareBreakpoint`, `monitor`.
+### Writes (synchronous)
 
-- **virtualAllocEx, virtualProtectEx, getRegions, virtualQueryEx, injectDll, unloadDll, openFileMapping, mapViewOfFile**  
-  Advanced memory and DLL manipulation functions.
+```ts
+proc.writeInt32(addr, v)
+proc.writeUInt32(addr, v)
+proc.writeInt64(addr, v)
+proc.writeFloat(addr, v)
+proc.writeDouble(addr, v)
+proc.writePointer(addr, v)
+```
 
-### Main Types and Constants (`types.ts`)
+### Modules & regions
 
-- **type DataType**  
-  Supported data types for memory read/write: `'byte'`, `'int32'`, `'float'`, `'string'`, `'vector3'`, etc.
+```ts
+proc.modules()        // [{ base, size, path }]
+proc.module('x.dll')  // { base, size, path } | undefined
+proc.regions()        // [{ baseAddress, size, protection, type }]
+```
 
-- **type MemoryData<T extends DataType>**  
-  Maps a `DataType` to its corresponding JS type (`number`, `bigint`, `string`, `{x,y,z}`...)
+### Pattern scan (async — `Napi::AsyncWorker`, doesn't block the loop)
 
-- **interface Process**  
-  Information about an opened process (PID, handle, etc).
+```ts
+const hits = await proc.scan('48 8B ?? ?? 00')           // all readable regions
+const hits = await proc.scan('DE AD BE EF', {
+  module: 'game.dll',          // scope to a module's range
+  // or explicit:
+  start: 0x140000000n,
+  end:   0x141000000n,
+  onlyReadable: true,
+})
+// → bigint[] of matching addresses
+```
 
-- **interface Module**  
-  Information about a module loaded in a process.
+Pattern bytes are hex, `??` or `?` = wildcard byte.
 
-- **type Protection, PageProtection, AllocationType, BreakpointTriggerType**  
-  Auxiliary types for memory flags and protection.
+### Static helpers
 
-- **const FunctionTypes, SignatureTypes, MemoryAccessFlags, MemoryPageFlags, HardwareDebugRegisters, BreakpointTriggerTypes**  
-  Constants for flags and function types.
+```ts
+Process.list()                 // [{ pid, name }] — no handle needed
+Process.find('notepad')        // { pid, name } | undefined
+```
+
+### Errors
+
+Typed subclasses of `MemoryProcessError`:
+
+```ts
+try {
+  Process.open('missing.exe')
+} catch (e) {
+  if (e instanceof ProcessNotFoundError) { /* ... */ }
+}
+// ProcessNotFoundError, AccessDeniedError, ReadError, WriteError
+// each has .code and .win32code
+```
+
+## Platform support
+
+| | Node | Bun | Deno |
+|---|---|---|---|
+| Windows x64 | ✅ | ✅ | ✅ (N-API) |
+| Linux / macOS | — | — | — |
+
+Windows-only in v2.
+
+## Migrating from v1
+
+| v1 (memoryjs) | v2 |
+|---|---|
+| `openProcess(name)` → `processObject` | `Process.open(name)` → `Process` |
+| `readMemory(handle, addr, type)` | `proc.read<T>(addr)` / `proc.readInt32(addr)` |
+| `writeMemory(handle, addr, val, type)` | `proc.writeX(addr, val)` |
+| `findPattern(handle, sig, type, offset)` | `await proc.scan('AA ?? BB')` |
+| `getModules(pid)` | `proc.modules()` |
+| `closeProcess(handle)` | `proc.close()` or `using` |
 
 ---
 
-> See the [`src`](./src) folder for full details and comments on each function/type.
+MIT © JoShMiQueL

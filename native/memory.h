@@ -1,98 +1,31 @@
 #pragma once
-#ifndef MEMORY_H
-#define MEMORY_H
-#define WIN32_LEAN_AND_MEAN
-
+#include <napi.h>
 #include <windows.h>
-#include <TlHelp32.h>
+#include <cstdint>
 #include <vector>
-#include <string>
 
-class memory {
-public:
-  memory();
-  ~memory();
-  std::vector<MEMORY_BASIC_INFORMATION> getRegions(HANDLE hProcess);
+namespace mp {
 
-  template <class dataType>
-  dataType readMemory(HANDLE hProcess, DWORD64 address) {
-    dataType cRead;
-    ReadProcessMemory(hProcess, (LPVOID)address, &cRead, sizeof(dataType), NULL);
-    return cRead;
+// Read `size` bytes from `address` in `proc`. Returns bytes actually read.
+// Throws LastError on hard failure (0 bytes && error != PARTIAL).
+std::vector<std::uint8_t> ReadBytes(HANDLE proc, std::uintptr_t address, std::size_t size);
+bool WriteBytes(HANDLE proc, std::uintptr_t address, const std::uint8_t* data, std::size_t size);
+
+// Typed helpers
+template <typename T>
+T ReadValue(HANDLE proc, std::uintptr_t address) {
+  T out{};
+  SIZE_T read = 0;
+  if (!ReadProcessMemory(proc, reinterpret_cast<LPCVOID>(address), &out, sizeof(T), &read) || read != sizeof(T)) {
+    throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "ReadProcessMemory");
   }
+  return out;
+}
 
-  BOOL readBuffer(HANDLE hProcess, DWORD64 address, SIZE_T size, const char* dstBuffer) {
-    return ReadProcessMemory(hProcess, (LPVOID)address, (LPVOID)dstBuffer, size, NULL);
-  }
+template <typename T>
+bool WriteValue(HANDLE proc, std::uintptr_t address, const T& value) {
+  SIZE_T written = 0;
+  return WriteProcessMemory(proc, reinterpret_cast<LPVOID>(address), &value, sizeof(T), &written) && written == sizeof(T);
+}
 
-  char readChar(HANDLE hProcess, DWORD64 address) {
-    char value;
-    ReadProcessMemory(hProcess, (LPVOID)address, &value, sizeof(char), NULL);
-    return value;
-	}
-
-  BOOL readString(HANDLE hProcess, DWORD64 address, std::string* pString) {
-    int length = 0;
-    int BATCH_SIZE = 256;
-    char* data = (char*) malloc(sizeof(char) * BATCH_SIZE);
-    while (length <= BATCH_SIZE * 4096) {
-      BOOL success = readBuffer(hProcess, address + length, BATCH_SIZE, data);
-
-      if (success == 0) {
-        free(data);
-        break;
-      }
-
-      for (const char* ptr = data; ptr - data < BATCH_SIZE; ++ptr) {
-        if (*ptr == '\0') {
-          length += ptr - data + 1;
-
-          char* buffer = (char*) malloc(length);
-          readBuffer(hProcess, address, length, buffer);
-
-          *pString = std::string(buffer);
-
-          free(data);
-          free(buffer);
-
-          return TRUE;
-        }
-      }
-
-      length += BATCH_SIZE;
-    }
-
-    return FALSE;
-  }
-
-  template <class dataType>
-  void writeMemory(HANDLE hProcess, DWORD64 address, dataType value) {
-    WriteProcessMemory(hProcess, (LPVOID)address, &value, sizeof(dataType), NULL);
-  }
-
-  template <class dataType>
-  void writeMemory(HANDLE hProcess, DWORD64 address, dataType value, SIZE_T size) {
-	  void* buffer;
-
-	  if (std::is_pointer<dataType>::value) {
-      buffer = (void*)value;
-    } else {
-      buffer = &value; 
-    }
-
-	  WriteProcessMemory(hProcess, (LPVOID)address, buffer, size, NULL);
-  }
-
-  // Write String, Method 1: Utf8Value is converted to string, get pointer and length from string
-  // template <>
-  // void writeMemory<std::string>(HANDLE hProcess, DWORD address, std::string value) {
-  //  WriteProcessMemory(hProcess, (LPVOID)address, value.c_str(), value.length(), NULL);
-  // }
-
-  // Write String, Method 2: get pointer and length from Utf8Value directly
-  void writeMemory(HANDLE hProcess, DWORD64 address, char* value, SIZE_T size) {
-    WriteProcessMemory(hProcess, (LPVOID)address, value, size, NULL);
-  }
-};
-#endif
-#pragma once
+} // namespace mp
