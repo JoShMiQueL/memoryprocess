@@ -9,3 +9,8 @@ dist/
 
 *.tgz
 src/*.node
+
+tests/victim.exe
+tests/*.lib
+tests/*.exp
+*.obj
