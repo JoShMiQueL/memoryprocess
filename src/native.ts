@@ -14,7 +14,15 @@ interface Native {
   readValue(handle: number, address: number, type: string): number | bigint
   writeValue(handle: number, address: number, type: string, value: number | bigint): boolean
   readBuffer(handle: number, address: number, size: number): Buffer
+  writeBuffer(handle: number, address: number, data: Buffer): boolean
   scan(handle: number, pattern: string, opts?: { start?: number; end?: number; onlyReadable?: boolean }): Promise<bigint[]>
+  allocMemory(handle: number, size: number, protection: number): bigint
+  freeMemory(handle: number, address: number): boolean
+  protectMemory(handle: number, address: number, size: number, protection: number): number
+  isWow64(handle: number): boolean
+  listThreads(pid: number): number[]
+  suspendThread(tid: number): boolean
+  resumeThread(tid: number): boolean
 }
 
 // Resolution order: dist/memoryprocess.node (built/packaged) -> prebuilds via

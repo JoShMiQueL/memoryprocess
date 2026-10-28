@@ -12,6 +12,16 @@ Napi::Value GetRegionsSync(const Napi::CallbackInfo& info);
 Napi::Value ReadValueSync(const Napi::CallbackInfo& info);
 Napi::Value WriteValueSync(const Napi::CallbackInfo& info);
 Napi::Value ReadBufferSync(const Napi::CallbackInfo& info);
+Napi::Value WriteBufferSync(const Napi::CallbackInfo& info);
 Napi::Value ScanAsync(const Napi::CallbackInfo& info);
+
+// v2 Tier-1/2 additions
+Napi::Value AllocMemorySync(const Napi::CallbackInfo& info);      // VirtualAllocEx
+Napi::Value FreeMemorySync(const Napi::CallbackInfo& info);       // VirtualFreeEx
+Napi::Value ProtectMemorySync(const Napi::CallbackInfo& info);    // VirtualProtectEx
+Napi::Value IsWow64Sync(const Napi::CallbackInfo& info);          // IsWow64Process
+Napi::Value ListThreadsSync(const Napi::CallbackInfo& info);      // TH32CS_SNAPTHREAD
+Napi::Value SuspendThreadSync(const Napi::CallbackInfo& info);    // OpenThread+SuspendThread
+Napi::Value ResumeThreadSync(const Napi::CallbackInfo& info);     // OpenThread+ResumeThread
 
 } // namespace mp

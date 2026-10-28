@@ -5,6 +5,36 @@ export interface ProcessInfo { pid: number; name: string }
 export interface ModuleInfo { base: number; size: number; path: string }
 export interface Region { baseAddress: number; size: number; protection: number; type: number }
 
+export const Protection = {
+  PAGE_NOACCESS: 0x01,
+  PAGE_READONLY: 0x02,
+  PAGE_READWRITE: 0x04,
+  PAGE_WRITECOPY: 0x08,
+  PAGE_EXECUTE: 0x10,
+  PAGE_EXECUTE_READ: 0x20,
+  PAGE_EXECUTE_READWRITE: 0x40,
+  PAGE_EXECUTE_WRITECOPY: 0x80,
+  PAGE_GUARD: 0x100,
+} as const
+
+export const AllocationType = {
+  MEM_COMMIT: 0x1000,
+  MEM_RESERVE: 0x2000,
+  MEM_TOP_DOWN: 0x100000,
+} as const
+
+export const ProcessAccess = {
+  ALL: 0x1fffff,
+  VM_READ: 0x0010,
+  VM_WRITE: 0x0020,
+  VM_OPERATION: 0x0008,
+  QUERY_INFORMATION: 0x0400,
+  QUERY_LIMITED: 0x1000,
+  CREATE_THREAD: 0x0002,
+  SUSPEND_RESUME: 0x0800,
+  READ_WRITE_QUERY: 0x0010 | 0x0020 | 0x0008 | 0x0400,
+} as const
+
 export interface ScanOptions {
   /** start address (default 0) */
   start?: number | bigint
@@ -77,6 +107,49 @@ export class Process implements Disposable {
     return buf.subarray(0, end === -1 ? buf.length : end).toString(encoding)
   }
 
+  /** Read a NUL-terminated UTF-16 (wide) string. */
+  readWideString(addr: number | bigint, maxChars = 256): string {
+    const buf = this.readBuffer(addr, maxChars * 2)
+    let end = buf.length
+    for (let i = 0; i + 1 < buf.length; i += 2) {
+      if (buf[i] === 0 && buf[i + 1] === 0) { end = i; break }
+    }
+    return buf.subarray(0, end).toString('utf16le')
+  }
+
+  readUInt16(addr: number | bigint): number {
+    return this.readBuffer(addr, 2).readUInt16LE(0)
+  }
+  readUInt8(addr: number | bigint): number {
+    return this.readBuffer(addr, 1).readUInt8(0)
+  }
+
+  /** Read a flat struct by a shape of {name: [offset, type]}. */
+  readStruct<T extends Record<string, [number, 'int32'|'uint32'|'float'|'double']>>(
+    addr: number | bigint, shape: T
+  ): { [K in keyof T]: T[K][1] extends 'int64'|'uint64'|'pointer' ? bigint : number } {
+    const out: Record<string, number | bigint> = {}
+    for (const [k, [off, type]] of Object.entries(shape)) {
+      out[k] = this.readValueAt(Number(addr) + off, type)
+    }
+    return out as any
+  }
+
+  readValueAt(addr: number | bigint, type: string): number | bigint {
+    this.assertOpen()
+    try { return native.readValue(this.#handle, Number(addr), type) }
+    catch { throw new ReadError(addr) }
+  }
+
+  /** Follow a pointer chain: read pointer at `base`, then apply each offset. */
+  resolvePointer(base: number | bigint, offsets: readonly number[]): bigint {
+    let addr = this.readPointer(base)
+    for (let i = 0; i < offsets.length - 1; i++) {
+      addr = this.readPointer(addr + BigInt(offsets[i]!))
+    }
+    return addr + BigInt(offsets[offsets.length - 1] ?? 0)
+  }
+
   #read<T extends number | bigint>(addr: number | bigint, type: string): T {
     this.assertOpen()
     try { return native.readValue(this.#handle, Number(addr), type) as T }
@@ -91,6 +164,16 @@ export class Process implements Disposable {
   writeFloat(addr: number | bigint, v: number): boolean { return this.#write(addr, 'float', v) }
   writeDouble(addr: number | bigint, v: number): boolean { return this.#write(addr, 'double', v) }
   writePointer(addr: number | bigint, v: bigint): boolean { return this.#write(addr, 'pointer', v) }
+  writeUInt8(addr: number | bigint, v: number): boolean { return this.writeBuffer(addr, Buffer.from([v & 0xff])) }
+  writeUInt16(addr: number | bigint, v: number): boolean { const b = Buffer.alloc(2); b.writeUInt16LE(v & 0xffff); return this.writeBuffer(addr, b) }
+
+  /** Write raw bytes. */
+  writeBuffer(addr: number | bigint, data: Buffer | Uint8Array): boolean {
+    this.assertOpen()
+    const ok = native.writeBuffer(this.#handle, Number(addr), Buffer.from(data))
+    if (!ok) throw new WriteError(addr)
+    return ok
+  }
 
   #write(addr: number | bigint, type: string, v: number | bigint): boolean {
     this.assertOpen()
@@ -106,6 +189,79 @@ export class Process implements Disposable {
     return this.modules().find(m => m.path.split(/[\\/]/).pop()!.toLowerCase() === want)
   }
   regions(): Region[] { this.assertOpen(); return native.getRegions(this.#handle) }
+
+  // ---- memory management ----
+  /** Allocate memory in the remote process. Returns base address (bigint). */
+  alloc(size: number, protection: number = Protection.PAGE_EXECUTE_READWRITE): bigint {
+    this.assertOpen()
+    return native.allocMemory(this.#handle, size, protection)
+  }
+  /** Free remote memory allocated with {@link alloc}. */
+  free(addr: number | bigint): boolean {
+    this.assertOpen()
+    return native.freeMemory(this.#handle, Number(addr))
+  }
+  /** Change page protection. Returns previous protection. */
+  protect(addr: number | bigint, size: number, protection: number): number {
+    this.assertOpen()
+    return native.protectMemory(this.#handle, Number(addr), size, protection)
+  }
+
+  /** Write bytes that may live in a protected/code region: protect→write→restore→flush. */
+  writeProtected(addr: number | bigint, data: Buffer | Uint8Array): boolean {
+    this.assertOpen()
+    const region = this.regions().find(r => {
+      const a = BigInt(r.baseAddress), s = BigInt(r.size), t = BigInt(addr)
+      return t >= a && t < a + s
+    })
+    const old = this.protect(addr, data.length, Protection.PAGE_EXECUTE_READWRITE)
+    try {
+      return this.writeBuffer(addr, data)
+    } finally {
+      this.protect(addr, data.length, old ?? Protection.PAGE_EXECUTE_READ)
+      // TODO FlushInstructionCache via native when needed
+    }
+  }
+  /** NOP `len` bytes at `addr` (0x90). */
+  nop(addr: number | bigint, len: number): boolean {
+    return this.writeProtected(addr, Buffer.alloc(len, 0x90))
+  }
+  /** Write an E9 relative jump from `src` to `dst` (5 bytes). */
+  patchJump(src: number | bigint, dst: number | bigint): boolean {
+    const rel = BigInt(dst) - (BigInt(src) + 5n)
+    const buf = Buffer.alloc(5)
+    buf[0] = 0xe9
+    buf.writeInt32LE(Number(BigInt.asIntN(32, rel)), 1)
+    return this.writeProtected(src, buf)
+  }
+
+  // ---- threads / info ----
+  /** Is this a 32-bit process under WOW64 (relevant to pointer width). */
+  get isWow64(): boolean { this.assertOpen(); return native.isWow64(this.#handle) }
+  /** Pointer size in bytes for this process. */
+  get pointerSize(): number { return this.isWow64 ? 4 : 8 }
+  /** Thread IDs owned by this process. */
+  threads(): number[] { this.assertOpen(); return native.listThreads(this.pid) }
+  /** Suspend a thread by id. */
+  suspendThread(tid: number): boolean { return native.suspendThread(tid) }
+  /** Resume a thread by id. */
+  resumeThread(tid: number): boolean { return native.resumeThread(tid) }
+  /** Suspend all threads of this process (for atomic patching). */
+  suspendAll(): number[] { const t = this.threads(); t.forEach(id => this.suspendThread(id)); return t }
+  /** Resume all threads of this process. */
+  resumeAll(): void { this.threads().forEach(id => this.resumeThread(id)) }
+
+  // ---- helpers ----
+  /** Resolve a RIP-relative address: `hit + offset + 4 + rel32` (x64 mov/movaps sigs). */
+  resolveRIPRelative(hitAddr: number | bigint, offset = 3): bigint {
+    const rel = this.readInt32(BigInt(hitAddr) + BigInt(offset))
+    return BigInt(hitAddr) + BigInt(offset) + 4n + BigInt(rel)
+  }
+  /** Read a whole region once into a buffer and expose offset accessors (bulk-read perf). */
+  readRegion(addr: number | bigint, size: number): RegionView {
+    const buf = this.readBuffer(addr, size)
+    return new RegionView(buf, BigInt(addr))
+  }
 
   // ---- pattern scan (async) ----
   async scan(pattern: string, opts: ScanOptions = {}): Promise<bigint[]> {
@@ -128,4 +284,20 @@ export class Process implements Disposable {
   }
 
   [Symbol.dispose](): void { this.close() }
+}
+
+/** A read-once-index-locally view over a region buffer. */
+export class RegionView {
+  constructor(private buf: Buffer, readonly base: bigint) {}
+  get size() { return this.buf.length }
+  int32At(off: number) { return this.buf.readInt32LE(off) }
+  uint32At(off: number) { return this.buf.readUInt32LE(off) }
+  floatAt(off: number) { return this.buf.readFloatLE(off) }
+  doubleAt(off: number) { return this.buf.readDoubleLE(off) }
+  ptrAt(off: number) { return this.buf.readBigUInt64LE(off) }
+  stringAt(off: number, max = 256) {
+    const end = this.buf.indexOf(0, off)
+    return this.buf.subarray(off, end === -1 ? off + max : Math.min(end, off + max)).toString('utf8')
+  }
+  bytes(off: number, len: number) { return this.buf.subarray(off, off + len) }
 }

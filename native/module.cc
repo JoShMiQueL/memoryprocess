@@ -1,6 +1,7 @@
 #include "module.h"
 #include "memory.h"
 #include <system_error>
+#include <tlhelp32.h>
 
 namespace mp {
 
@@ -120,6 +121,100 @@ Napi::Value ReadBufferSync(const Napi::CallbackInfo& info) {
     err.ThrowAsJavaScriptException();
     return env.Null();
   }
+}
+
+Napi::Value WriteBufferSync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 3) { Napi::TypeError::New(env, "expected (handle,address,buffer)").ThrowAsJavaScriptException(); return env.Null(); }
+  HANDLE h = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(info[0].As<Napi::Number>().DoubleValue()));
+  auto addr = static_cast<std::uintptr_t>(info[1].As<Napi::Number>().DoubleValue());
+  if (!info[2].IsBuffer()) { Napi::TypeError::New(env, "value must be a Buffer").ThrowAsJavaScriptException(); return env.Null(); }
+  auto buf = info[2].As<Napi::Buffer<std::uint8_t>>();
+  bool ok = WriteBytes(h, addr, buf.Data(), buf.Length());
+  return Napi::Boolean::New(env, ok);
+}
+
+// ---------- v2 Tier-1/2 ----------
+
+Napi::Value AllocMemorySync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 3) { Napi::TypeError::New(env, "expected (handle,size,protection)").ThrowAsJavaScriptException(); return env.Null(); }
+  HANDLE h = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(info[0].As<Napi::Number>().DoubleValue()));
+  auto size = static_cast<SIZE_T>(info[1].As<Napi::Number>().DoubleValue());
+  DWORD prot = info[2].As<Napi::Number>().Uint32Value();
+  LPVOID p = VirtualAllocEx(h, nullptr, size, MEM_COMMIT | MEM_RESERVE, prot);
+  if (!p) { auto e = Napi::Error::New(env, "VirtualAllocEx failed"); e.Set("code", "ALLOC_FAILED"); e.Set("win32code", Napi::Number::New(env, (double)GetLastError())); e.ThrowAsJavaScriptException(); return env.Null(); }
+  return Napi::BigInt::New(env, reinterpret_cast<std::uint64_t>(p));
+}
+
+Napi::Value FreeMemorySync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 2) { Napi::TypeError::New(env, "expected (handle,address)").ThrowAsJavaScriptException(); return env.Null(); }
+  HANDLE h = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(info[0].As<Napi::Number>().DoubleValue()));
+  auto addr = static_cast<std::uintptr_t>(info[1].As<Napi::Number>().DoubleValue());
+  return Napi::Boolean::New(env, VirtualFreeEx(h, reinterpret_cast<LPVOID>(addr), 0, MEM_RELEASE) != 0);
+}
+
+Napi::Value ProtectMemorySync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 3) { Napi::TypeError::New(env, "expected (handle,address,size,prot)").ThrowAsJavaScriptException(); return env.Null(); }
+  HANDLE h = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(info[0].As<Napi::Number>().DoubleValue()));
+  auto addr = static_cast<std::uintptr_t>(info[1].As<Napi::Number>().DoubleValue());
+  auto size = static_cast<SIZE_T>(info[2].As<Napi::Number>().DoubleValue());
+  DWORD prot = info[3].As<Napi::Number>().Uint32Value();
+  DWORD old = 0;
+  if (!VirtualProtectEx(h, reinterpret_cast<LPVOID>(addr), size, prot, &old)) {
+    auto e = Napi::Error::New(env, "VirtualProtectEx failed"); e.Set("code", "PROTECT_FAILED"); e.Set("win32code", Napi::Number::New(env, (double)GetLastError())); e.ThrowAsJavaScriptException(); return env.Null();
+  }
+  return Napi::Number::New(env, static_cast<double>(old));
+}
+
+Napi::Value IsWow64Sync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 1 || !info[0].IsNumber()) { Napi::TypeError::New(env, "expected handle").ThrowAsJavaScriptException(); return env.Null(); }
+  HANDLE h = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(info[0].As<Napi::Number>().DoubleValue()));
+  BOOL w = FALSE;
+  IsWow64Process(h, &w);
+  return Napi::Boolean::New(env, w != 0);
+}
+
+Napi::Value ListThreadsSync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 1 || !info[0].IsNumber()) { Napi::TypeError::New(env, "expected pid").ThrowAsJavaScriptException(); return env.Null(); }
+  DWORD pid = info[0].As<Napi::Number>().Uint32Value();
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+  if (snap == INVALID_HANDLE_VALUE) return env.Null();
+  std::vector<DWORD> tids;
+  THREADENTRY32 te{}; te.dwSize = sizeof(te);
+  if (Thread32First(snap, &te)) {
+    do { if (te.th32OwnerProcessID == pid) tids.push_back(te.th32ThreadID); } while (Thread32Next(snap, &te));
+  }
+  CloseHandle(snap);
+  auto arr = Napi::Array::New(env, tids.size());
+  for (size_t i = 0; i < tids.size(); i++) arr.Set(i, Napi::Number::New(env, tids[i]));
+  return arr;
+}
+
+Napi::Value SuspendThreadSync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 1 || !info[0].IsNumber()) { Napi::TypeError::New(env, "expected tid").ThrowAsJavaScriptException(); return env.Null(); }
+  DWORD tid = info[0].As<Napi::Number>().Uint32Value();
+  HANDLE t = OpenThread(THREAD_SUSPEND_RESUME, FALSE, tid);
+  if (!t) return Napi::Boolean::New(env, false);
+  DWORD r = SuspendThread(t);
+  CloseHandle(t);
+  return Napi::Boolean::New(env, r != (DWORD)-1);
+}
+
+Napi::Value ResumeThreadSync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 1 || !info[0].IsNumber()) { Napi::TypeError::New(env, "expected tid").ThrowAsJavaScriptException(); return env.Null(); }
+  DWORD tid = info[0].As<Napi::Number>().Uint32Value();
+  HANDLE t = OpenThread(THREAD_SUSPEND_RESUME, FALSE, tid);
+  if (!t) return Napi::Boolean::New(env, false);
+  DWORD r = ResumeThread(t);
+  CloseHandle(t);
+  return Napi::Boolean::New(env, r != (DWORD)-1);
 }
 
 // readValue(handle, address, type) where type in:
