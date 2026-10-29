@@ -19,6 +19,10 @@ static Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("listThreads", Napi::Function::New(env, mp::ListThreadsSync));
   exports.Set("suspendThread", Napi::Function::New(env, mp::SuspendThreadSync));
   exports.Set("resumeThread", Napi::Function::New(env, mp::ResumeThreadSync));
+  exports.Set("readSafe", Napi::Function::New(env, mp::ReadSafeSync));
+  exports.Set("flushInstructions", Napi::Function::New(env, mp::FlushInstructionsSync));
+  exports.Set("injectDll", Napi::Function::New(env, mp::InjectDllSync));
+  exports.Set("ejectDll", Napi::Function::New(env, mp::EjectDllSync));
   return exports;
 }
 

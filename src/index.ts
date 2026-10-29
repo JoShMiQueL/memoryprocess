@@ -7,4 +7,6 @@ export {
   AccessDeniedError,
   ReadError,
   WriteError,
+  ScanError,
+  InjectError,
 } from './errors.js'

@@ -23,6 +23,10 @@ interface Native {
   listThreads(pid: number): number[]
   suspendThread(tid: number): boolean
   resumeThread(tid: number): boolean
+  readSafe(handle: number, address: number, size: number): Buffer
+  flushInstructions(handle: number, address: number, size: number): boolean
+  injectDll(pid: number, dllPath: string): boolean
+  ejectDll(pid: number, moduleBase: number): boolean
 }
 
 // Resolution order: dist/memoryprocess.node (built/packaged) -> prebuilds via

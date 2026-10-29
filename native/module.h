@@ -24,4 +24,10 @@ Napi::Value ListThreadsSync(const Napi::CallbackInfo& info);      // TH32CS_SNAP
 Napi::Value SuspendThreadSync(const Napi::CallbackInfo& info);    // OpenThread+SuspendThread
 Napi::Value ResumeThreadSync(const Napi::CallbackInfo& info);     // OpenThread+ResumeThread
 
+// v2 final-batch additions
+Napi::Value ReadSafeSync(const Napi::CallbackInfo& info);         // VirtualQueryEx walk + zero-fill
+Napi::Value FlushInstructionsSync(const Napi::CallbackInfo& info);// FlushInstructionCache
+Napi::Value InjectDllSync(const Napi::CallbackInfo& info);        // LoadLibraryA remote thread
+Napi::Value EjectDllSync(const Napi::CallbackInfo& info);         // FreeLibrary remote thread
+
 } // namespace mp

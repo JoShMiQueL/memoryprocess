@@ -46,6 +46,12 @@ __declspec(dllexport) volatile uint8_t   g_bigbuf[4096];
 // self-mutating counter (for repeated-read tests)
 __declspec(dllexport) volatile int32_t g_counter = 0;
 
+// second instance of the common 2-byte sequence "DE AD" so module scans of it
+// are guaranteed to be multi-hit (first instance lives inside g_pattern)
+__declspec(dllexport) volatile uint8_t g_pattern2[8] = {
+  0xDE, 0xAD, 0x00, 0x11, 0xDE, 0xAD, 0x22, 0x33
+};
+
 int main(void) {
   g_ptr = (volatile int32_t*)&g_i32;
   g_pp  = (volatile int32_t**)&g_ptr;
@@ -68,6 +74,19 @@ int main(void) {
   printf("&g_pattern=%p &g_ptr=%p &g_pp=%p &g_ppp=%p &g_entity=%p &g_array=%p &g_bigbuf=%p &g_counter=%p\n",
     &g_pattern,&g_ptr,&g_pp,&g_ppp,&g_entity,&g_array,&g_bigbuf,&g_counter);
   printf("&g_i64=%p\n", &g_i64); // repeat for parser
+
+  // PAGE_GUARD region: 2 pages — first page committed RW filled with 0xC5,
+  // second page RW + PAGE_GUARD (unreadable via ReadProcessMemory).
+  {
+    LPVOID guard = VirtualAlloc(NULL, 0x2000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (guard) {
+      DWORD oldp = 0;
+      memset(guard, 0xC5, 0x1000);
+      VirtualProtect((BYTE*)guard + 0x1000, 0x1000, PAGE_READWRITE | PAGE_GUARD, &oldp);
+      printf("&g_guard=%p &g_guard_end=%p\n", guard, (BYTE*)guard + 0x2000);
+    }
+  }
+  printf("&g_pattern2=%p\n", &g_pattern2);
   fflush(stdout);
 
   DWORD t = 0;

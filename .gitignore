@@ -14,3 +14,5 @@ tests/victim.exe
 tests/*.lib
 tests/*.exp
 *.obj
+
+tests/*.dll

@@ -20,3 +20,15 @@ export class ReadError extends MemoryProcessError {
 export class WriteError extends MemoryProcessError {
   constructor(addr: bigint | number) { super(`WriteProcessMemory failed at 0x${addr.toString(16)}`, 'WRITE_FAILED'); this.name = 'WriteError' }
 }
+export class ScanError extends MemoryProcessError {
+  constructor(hits: number, pattern: string) {
+    super(hits === 0
+      ? `Pattern not found: ${pattern}`
+      : `Pattern not unique: ${hits} matches for ${pattern}`,
+      hits === 0 ? 'PATTERN_NOT_FOUND' : 'PATTERN_NOT_UNIQUE')
+    this.name = 'ScanError'
+  }
+}
+export class InjectError extends MemoryProcessError {
+  constructor(detail: string, win32?: number) { super(`DLL injection failed: ${detail}`, 'INJECT_FAILED', win32); this.name = 'InjectError' }
+}

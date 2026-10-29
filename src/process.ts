@@ -1,5 +1,5 @@
 import { native } from './native.js'
-import { ProcessNotFoundError, AccessDeniedError, ReadError, WriteError } from './errors.js'
+import { ProcessNotFoundError, AccessDeniedError, ReadError, WriteError, ScanError, InjectError } from './errors.js'
 
 export interface ProcessInfo { pid: number; name: string }
 export interface ModuleInfo { base: number; size: number; path: string }
@@ -57,8 +57,14 @@ export class Process implements Disposable {
     this.pid = pid
   }
 
-  /** Open a process by name ("notepad.exe") or pid. Throws ProcessNotFoundError / AccessDeniedError. */
-  static open(nameOrPid: string | number, access?: number): Process {
+  /**
+   * Open a process by name ("notepad.exe") or pid.
+   * Default access is least-privilege VM_READ|VM_WRITE|VM_OPERATION|QUERY_INFORMATION.
+   * Pass `{ access }` (or a raw access number) to override.
+   * Throws ProcessNotFoundError / AccessDeniedError.
+   */
+  static open(nameOrPid: string | number, opts?: { access?: number } | number): Process {
+    const access = typeof opts === 'number' ? opts : opts?.access
     try {
       const { handle, pid } = native.openProcess(nameOrPid, access)
       return new Process(handle, pid)
@@ -67,6 +73,11 @@ export class Process implements Disposable {
       if (e?.code === 'ACCESS_DENIED' || e?.win32code === 5) throw new AccessDeniedError(typeof nameOrPid === 'number' ? nameOrPid : -1)
       throw e
     }
+  }
+
+  /** Open with read-only access (VM_READ|QUERY_INFORMATION). */
+  static openReadOnly(nameOrPid: string | number): Process {
+    return Process.open(nameOrPid, { access: ProcessAccess.VM_READ | ProcessAccess.QUERY_INFORMATION })
   }
 
   /** List running processes without opening a handle. */
@@ -122,6 +133,17 @@ export class Process implements Disposable {
   }
   readUInt8(addr: number | bigint): number {
     return this.readBuffer(addr, 1).readUInt8(0)
+  }
+
+  /**
+   * Fault-tolerant read: returns a `size`-byte buffer; spans covering
+   * inaccessible/uncommitted pages come back zeroed instead of throwing.
+   * Throws ReadError only if the handle itself is invalid.
+   */
+  readSafe(addr: number | bigint, size: number): Buffer {
+    this.assertOpen()
+    try { return native.readSafe(this.#handle, Number(addr), size) }
+    catch (e: any) { throw new ReadError(addr, e?.win32code) }
   }
 
   /** Read a flat struct by a shape of {name: [offset, type]}. */
@@ -219,7 +241,7 @@ export class Process implements Disposable {
       return this.writeBuffer(addr, data)
     } finally {
       this.protect(addr, data.length, old ?? Protection.PAGE_EXECUTE_READ)
-      // TODO FlushInstructionCache via native when needed
+      native.flushInstructions(this.#handle, Number(addr), data.length)
     }
   }
   /** NOP `len` bytes at `addr` (0x90). */
@@ -273,6 +295,77 @@ export class Process implements Disposable {
       if (m) { start = m.base; end = m.base + m.size }
     }
     return native.scan(this.#handle, pattern, { start, end, onlyReadable: opts.onlyReadable ?? true })
+  }
+
+  /** First match for `pattern`, or null when nothing matches. */
+  async scanFirst(pattern: string, opts: ScanOptions = {}): Promise<bigint | null> {
+    const hits = await this.scan(pattern, opts)
+    return hits.length ? hits[0]! : null
+  }
+
+  /** Exactly-one-match scan. Throws ScanError when 0 or >1 hits. */
+  async scanUnique(pattern: string, opts: ScanOptions = {}): Promise<bigint> {
+    const hits = await this.scan(pattern, opts)
+    if (hits.length !== 1) throw new ScanError(hits.length, pattern)
+    return hits[0]!
+  }
+
+  // ---- dll injection ----
+  /**
+   * Inject `absolutePath` (a DLL) into this process via LoadLibraryA on a remote
+   * thread. Re-opens the process internally with the required rights.
+   * Throws InjectError on failure.
+   */
+  injectDll(absolutePath: string): boolean {
+    this.assertOpen()
+    try { return native.injectDll(this.pid, absolutePath) }
+    catch (e: any) { throw new InjectError(e?.message ?? 'unknown', e?.win32code) }
+  }
+
+  /**
+   * Eject a loaded module via FreeLibrary on a remote thread. Accepts a
+   * ModuleInfo or a substring matched (case-insensitive) against module names.
+   * Throws InjectError on failure / no match.
+   */
+  ejectDll(module: ModuleInfo | string): boolean {
+    this.assertOpen()
+    let base: number | undefined
+    if (typeof module === 'string') {
+      const want = module.toLowerCase()
+      const m = this.modules().find(m => {
+        const name = m.path.split(/[\\/]/).pop()!.toLowerCase()
+        return name.includes(want)
+      })
+      if (!m) throw new InjectError(`module not found: ${module}`)
+      base = m.base
+    } else {
+      base = module.base
+    }
+    try { return native.ejectDll(this.pid, base) }
+    catch (e: any) { throw new InjectError(e?.message ?? 'unknown', e?.win32code) }
+  }
+
+  // ---- watch ----
+  /**
+   * Poll `readInt32` at `addr` every `intervalMs`; invoke `cb(newVal, oldVal)`
+   * on change. Returns an unsubscribe function. Read failures are ignored
+   * (the target may exit or the page may become inaccessible).
+   */
+  watch(addr: number | bigint, cb: (newVal: number, oldVal: number) => void, intervalMs = 50): () => void {
+    this.assertOpen()
+    let prev: number | undefined
+    try { prev = this.readInt32(addr) } catch { /* start uninitialized */ }
+    const timer = setInterval(() => {
+      let cur: number
+      try { cur = this.readInt32(addr) } catch { return }
+      if (prev === undefined || cur !== prev) {
+        const old = prev
+        prev = cur
+        if (old !== undefined) cb(cur, old)
+      }
+    }, intervalMs)
+    if (typeof timer.unref === 'function') timer.unref()
+    return () => clearInterval(timer)
   }
 
   /** Close the process handle. Idempotent. */
