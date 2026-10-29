@@ -1599,31 +1599,38 @@ export class Process implements Disposable {
   // ---- high-level cheat-dev helpers ----
 
   /**
-   * Fluent pointer-chain address. `base` may be a bigint, a numeric address,
-   * a `"module+rva"` string, or a bare module name — in which case `chain[0]`
-   * is the RVA (added to the module base, not dereferenced) and the rest is
-   * the pointer chain:
+   * Fluent pointer-chain address. **Canonical form:**
+   * `addr('module', rva, ...offsets)` — the module name, then the RVA added
+   * to its base, then the pointer chain (all-but-last dereference):
    * ```ts
    * proc.addr('game.exe', 0x1F2A3C, 0x10, 0x28, 0x8).readInt32()
-   * proc.addr('game.exe+0x1F2A3C', 0x10, 0x28, 0x8).readInt32()  // same
-   * proc.addr(bigintBase, 0x10, 0x28, 0x8).readInt32()
    * ```
+   * Equivalent accepted forms:
+   * ```ts
+   * proc.addr('game.exe+0x1F2A3C', 0x10, 0x28, 0x8)  // CE paste-friendly
+   * proc.addr(mod.base + 0x1F2A3Cn, 0x10, 0x28, 0x8) // raw bigint base
+   * ```
+   * In the `'mod+rva'` / bigint forms every `chain` offset is a deref hop —
+   * the rva is already in the base. Writing `addr('mod+0x100', 0x100, ...)`
+   * (rva repeated as chain[0]) throws `AMBIGUOUS_ADDRESS_EXPR`; pass the
+   * numeric base if that deref is truly intended.
    */
   addr(base: number | bigint | string, ...chain: number[]): Address {
     return new Address(this, base, chain);
   }
 
   /**
-   * Named pointer-chain table — a CE-style address list. Each entry is
-   * `[base, ...offsets]` where `base` is a bigint, a number, a `"module+rva"`
-   * string, or a bare module name (then `offsets[0]` is the RVA). Returns a
-   * typed map of {@link Address} objects, so chains are defined once and
-   * read/written by name:
+   * Named pointer-chain table — a CE-style address list. **Canonical entry
+   * form:** `['module', rva, ...offsets]`. `base` may also be a bigint, a
+   * `"module+rva"` string, or a raw address — same rules as {@link addr}.
+   * Returns a typed map of {@link Address} objects, so chains are defined
+   * once and read/written by name:
    * ```ts
    * const p = proc.pointers({
    *   health: ['game.exe', 0x1F2A3C, 0x10, 0x28, 0x8],
    *   mana:   ['game.exe', 0x1F2A3C, 0x18, 0x30],
-   *   money:  [moneyBase, 0x8],
+   *   money:  ['game.exe+0x2B4D80', 0x8],   // CE-string form also fine
+   *   raw:    [bigBase, 0x10],              // raw bigint base
    * });
    * p.health.readInt32();   // 87
    * p.mana.writeInt32(999);

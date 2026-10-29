@@ -120,6 +120,76 @@ describe('proc.addr — CE-style mod+rva + chain', () => {
       const a = proc.addr(`victim.exe+0x${rva.toString(16)}`, 0, 0, 0);
       expect(a.resolve()).toBe(victim.addr.g_i32);
     });
+
+    describe('ambiguity heuristic — rva repeated as chain[0]', () => {
+      test("'mod+rva' + chain[0]==rva throws AMBIGUOUS_ADDRESS_EXPR", () => {
+        using proc = Process.open(victim.pid);
+        const mod = proc.module('victim.exe')!;
+        const rva = Number(victim.addr.g_i32) - mod.base;
+        try {
+          proc.addr(`victim.exe+0x${rva.toString(16)}`, rva, 0x10);
+          expect.unreachable('should throw');
+        } catch (e: any) {
+          expect(e.code).toBe('AMBIGUOUS_ADDRESS_EXPR');
+          expect(e.message).toContain('dereference');
+        }
+      });
+
+      test('rva==0 does NOT trigger (chain[0]=0 is a normal deref)', () => {
+        using proc = Process.open(victim.pid);
+        // 'mod+0' embeds rva 0 → heuristic skips; chain[0]=0 derefs base.
+        // victim base itself isn't a pointer target we control, so just
+        // assert construction doesn't throw (resolve may fail on read).
+        expect(() => proc.addr('victim.exe+0', 0)).not.toThrow();
+      });
+
+      test('different chain[0] value does NOT trigger', () => {
+        using proc = Process.open(victim.pid);
+        const mod = proc.module('victim.exe')!;
+        const rva = Number(victim.addr.g_ppp) - mod.base;
+        // chain[0]=0 ≠ rva → clean construction, correct resolve
+        const a = proc.addr(`victim.exe+0x${rva.toString(16)}`, 0, 0, 0);
+        expect(a.resolve()).toBe(victim.addr.g_i32);
+      });
+
+      test('numeric base bypasses the heuristic entirely', () => {
+        using proc = Process.open(victim.pid);
+        const mod = proc.module('victim.exe')!;
+        const rva = Number(victim.addr.g_ppp) - mod.base;
+        // numeric base + chain[0]==rva → legal, no heuristic
+        const a = proc.addr(BigInt(mod.base) + BigInt(rva), 0, 0, 0);
+        expect(a.resolve()).toBe(victim.addr.g_i32);
+      });
+
+      test('pointers() defs get the same validation', () => {
+        using proc = Process.open(victim.pid);
+        const mod = proc.module('victim.exe')!;
+        const rva = Number(victim.addr.g_i32) - mod.base;
+        expect(() =>
+          proc.pointers({
+            bad: [`victim.exe+0x${rva.toString(16)}`, rva],
+          }),
+        ).toThrow(/AMBIGUOUS|appears twice/);
+      });
+    });
+
+    describe('canonical form is unambiguous', () => {
+      test("['mod', rva, ...chain] ≡ ['mod+rva', ...chain]", () => {
+        using proc = Process.open(victim.pid);
+        const mod = proc.module('victim.exe')!;
+        const rva = Number(victim.addr.g_ppp) - mod.base;
+        const canonical = proc.addr('victim.exe', rva, 0, 0, 0).resolve();
+        const ceForm = proc
+          .addr(`victim.exe+0x${rva.toString(16)}`, 0, 0, 0)
+          .resolve();
+        const rawForm = proc
+          .addr(BigInt(mod.base) + BigInt(rva), 0, 0, 0)
+          .resolve();
+        expect(canonical).toBe(ceForm);
+        expect(canonical).toBe(rawForm);
+        expect(canonical).toBe(victim.addr.g_i32);
+      });
+    });
   });
 });
 

@@ -121,12 +121,17 @@ const LOOKS_LIKE_MODULE = /[a-zA-Z]/;
 
 /**
  * Resolve a `"module+rva"` string, a bare numeric string, or a numeric base
- * to a bigint address. Strict: malformed expressions throw
- * `MemoryProcessError('INVALID_ADDRESS_EXPR')`, a missing module throws
- * `'MODULE_NOT_FOUND'`.
+ * to `{ base, rvaInString }` — the latter is the rva embedded in a
+ * `'mod+rva'` expression (0n when the form has no `+` or the rva is 0), so
+ * the caller can detect the ambiguous `('mod+rva', rva, ...)` overlap.
+ * Strict: malformed expressions throw `MemoryProcessError` with code
+ * `'INVALID_ADDRESS_EXPR'`; a missing module throws `'MODULE_NOT_FOUND'`.
  */
-function resolveBase(proc: Process, base: number | bigint | string): bigint {
-  if (typeof base !== 'string') return BigInt(base);
+function resolveBase(
+  proc: Process,
+  base: number | bigint | string,
+): { base: bigint; rvaInString: bigint } {
+  if (typeof base !== 'string') return { base: BigInt(base), rvaInString: 0n };
   const s = base.trim();
   const plus = s.indexOf('+');
   const minus = s.indexOf('-');
@@ -145,7 +150,7 @@ function resolveBase(proc: Process, base: number | bigint | string): bigint {
         'MODULE_NOT_FOUND',
       );
     }
-    return parseUint('address', s);
+    return { base: parseUint('address', s), rvaInString: 0n };
   }
 
   const modName = s.slice(0, plus).trim();
@@ -166,7 +171,8 @@ function resolveBase(proc: Process, base: number | bigint | string): bigint {
       `module ${modName} not loaded`,
       'MODULE_NOT_FOUND',
     );
-  return BigInt(mod.base) + parseUint('rva', rvaStr);
+  const rva = parseUint('rva', rvaStr);
+  return { base: BigInt(mod.base) + rva, rvaInString: rva };
 }
 
 /** True when `base` is a bare module name (no `+`) that resolves to a loaded module. */
@@ -196,8 +202,16 @@ export class Address {
    *   (added to the module base, not dereferenced) and `chain[1:]` is the
    *   pointer chain. So `new Address(p, 'game.exe', [0x1F2A3C, 0x10])` ≡
    *   `new Address(p, 'game.exe+0x1F2A3C', [0x10])`.
+   *
    * `chain` offsets are walked like {@link Process.resolvePointer}: every
    * offset except the last dereferences the pointer, the last is added.
+   *
+   * **Canonical form** is `('mod', rva, ...chain)` — every number has exactly
+   * one meaning. When `base` already carries a `+rva`, `chain[0]` is a deref
+   * hop like any other; if it *equals* the embedded rva (and rva > 0) that's
+   * almost always a doubled-rva bug, so it throws `AMBIGUOUS_ADDRESS_EXPR`.
+   * Escape hatch for the rare legitimate case: pass the numeric
+   * `mod.base + rva` bigint as base instead.
    */
   constructor(
     private proc: Process,
@@ -214,10 +228,28 @@ export class Address {
         );
       this.base = BigInt(mod.base) + BigInt(rva ?? 0);
       this.chain = rest;
-    } else {
-      this.base = resolveBase(proc, base);
-      this.chain = chain;
+      return;
     }
+
+    const { base: resolved, rvaInString } = resolveBase(proc, base);
+    if (
+      rvaInString !== 0n &&
+      chain.length > 0 &&
+      BigInt(chain[0]!) === rvaInString
+    ) {
+      throw new MemoryProcessError(
+        `ambiguous expression "${base}" + chain[0]=${chain[0]}: the rva ` +
+          `appears twice — once in the string and again as the first chain ` +
+          `offset (which dereferences, it does NOT re-add). ` +
+          `Did you mean '${(base as string).split('+')[0]!.trim()}', ` +
+          `${chain[0]}, ...chain (bare-module form)? If a deref-by-${chain[0]} ` +
+          `hop is really intended, pass the numeric base (mod.base + rva) ` +
+          `to bypass this check.`,
+        'AMBIGUOUS_ADDRESS_EXPR',
+      );
+    }
+    this.base = resolved;
+    this.chain = chain;
   }
 
   /** Derive a new Address with `off` appended to the chain. Immutable. */
