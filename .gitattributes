@@ -1,0 +1,13 @@
+# Force LF line endings for all text files so `bun fmt --check` is stable
+# across Windows checkouts (runner checks out CRLF otherwise -> false "needs
+# formatting"). Binaries are explicit.
+* text=auto eol=lf
+
+# Native/build artifacts never need checkout as text
+*.exe binary
+*.dll binary
+*.node binary
+*.lib binary
+*.exp binary
+*.obj binary
+*.tgz binary

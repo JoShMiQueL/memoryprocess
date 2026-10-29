@@ -1,0 +1,89 @@
+name: Publish
+
+on:
+  push:
+    tags: ['v*']
+  release:
+    types: [published]
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+# Least privilege: only the publish job mints an OIDC id-token.
+permissions:
+  contents: read
+
+jobs:
+  verify-tag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Tag must match package.json version
+        run: |
+          TAG="$GITHUB_REF_NAME"
+          VERSION=$(node -p "require('./package.json').version")
+          if [ "${TAG#v}" != "$VERSION" ]; then
+            echo "::error::tag $TAG does not match package.json version $VERSION"
+            exit 1
+          fi
+          echo "publishing $VERSION"
+
+  prebuild:
+    needs: verify-tag
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Build + prebuild
+        run: |
+          bun run build
+          bun run prebuild:all
+      - uses: actions/upload-artifact@v6
+        with:
+          name: prebuilds
+          path: prebuilds/
+
+  publish:
+    needs: [verify-tag, prebuild]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v6
+        with:
+          name: prebuilds
+          path: prebuilds/
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Upgrade npm (OIDC trusted publishing needs npm >= 11.5)
+        run: npm install -g npm@latest
+      - name: Build
+        run: bun run build
+      - name: Publish to npm (trusted publishing)
+        run: npm publish --provenance

@@ -1,0 +1,6 @@
+[lint]
+nativePluginRules = ["@typescript-eslint", "import"]
+
+[fmt]
+semi = true
+singleQuote = true
