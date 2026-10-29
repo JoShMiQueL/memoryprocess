@@ -27,14 +27,15 @@
     "clean": "node scripts/clean.mjs",
     "build": "node scripts/build.mjs",
     "build:victim": "node scripts/build-victim.mjs",
-    "prebuild": "prebuildify --all --napi",
+    "build:testdll": "node scripts/build-testdll.mjs",
+    "prebuild:all": "prebuildify --all --napi",
     "lint": "bun lint --type-aware",
     "format": "bun fmt",
     "check": "bun check",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "test:node": "node --test tests/compat/",
-    "prepublishOnly": "npm run build && npm run prebuild"
+    "prepublishOnly": "npm run build && npm run prebuild:all"
   },
   "repository": {
     "type": "git",
