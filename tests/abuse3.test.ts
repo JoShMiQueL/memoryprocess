@@ -621,12 +621,18 @@ describe('EntityList fuzz', () => {
     try {
       const list = proc.entityList({ first: pp, next: 0, max: 10 });
       const arr = list.toArray();
-      expect(arr.length).toBe(10); // capped
+      // FIXED: cycle detection stops at the repeated node — a self-loop yields
+      // 1 element, not `max` duplicates.
+      expect(arr.length).toBe(1);
       expect(arr[0]).toBe(pp);
     } finally {
       proc.writePointer(pp, saved);
     }
-    rec('next=self cycle', 'capped at max (no hang)', 'ok');
+    rec(
+      'next=self cycle',
+      'cycle detected — stops at repeat (no hang, no dupes)',
+      'ok',
+    );
   });
 
   test('max=0 → empty list (0 is legal)', () => {

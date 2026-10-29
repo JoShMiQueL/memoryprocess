@@ -175,6 +175,16 @@ function resolveBase(
     if (LOOKS_LIKE_MODULE.test(s) && !/^0[xX]/.test(s)) {
       // bare module name reaching here means it isn't loaded —
       // moduleFor() checks first and diverts to the module+rva path.
+      // BUT an all-hex literal like '1a2b' (letters but no dot/extension)
+      // is more likely a bare hex address than a module — prefer that read
+      // when it parses and looks like an address; else report missing module.
+      if (/^[0-9a-fA-F]+$/.test(s) && /[a-fA-F]/.test(s)) {
+        try {
+          return { base: BigInt('0x' + s), rvaInString: 0n };
+        } catch {
+          /* fall through to MODULE_NOT_FOUND */
+        }
+      }
       throw new MemoryProcessError(
         `module ${s} not loaded`,
         'MODULE_NOT_FOUND',
@@ -260,7 +270,7 @@ export class Address {
     const mod = moduleFor(proc, base);
     if (mod) {
       const [rva, ...rest] = chain;
-      if (rva !== undefined && (!Number.isFinite(rva) || rva < 0))
+      if (rva !== undefined && (!Number.isInteger(rva) || rva < 0))
         throw new MemoryProcessError(
           `invalid rva ${rva} for module '${base}' — must be a finite integer ≥ 0`,
           'INVALID_ADDRESS_EXPR',
@@ -402,6 +412,8 @@ export class Offsets {
   private proc?: Process;
   /** netvars / plain field offsets (name → offset number) */
   readonly netvars: Record<string, number> = {};
+  /** Entries that failed to resolve in the last `ready()` — name → error. */
+  readonly failures: Record<string, Error> = {};
   private resolved = false;
   /** Entry names populated as own properties by ready() (removed on re-bind). */
   private populated = new Set<string>();
@@ -421,12 +433,14 @@ export class Offsets {
     const db = new Offsets();
 
     // cs2-dumper style: top-level keys that are modules whose value is a
-    // flat {name: number} map → each becomes an rva entry on that module.
-    const isModuleMap = (v: unknown): v is Record<string, number> =>
+    // {name: rva} map. Members are filtered individually — a map that also
+    // holds a non-number key (a nested table, a comment field) doesn't lose
+    // the whole module's rvas, it just skips that member.
+    const isModuleMap = (v: unknown): v is Record<string, unknown> =>
       !!v &&
       typeof v === 'object' &&
       !Array.isArray(v) &&
-      Object.values(v).every((x) => typeof x === 'number');
+      Object.values(v).some((x) => typeof x === 'number');
     const looksModule = (k: string) => /\.(dll|exe)$/i.test(k);
 
     const add = (name: string, e: SigEntry | number | string) => {
@@ -482,13 +496,21 @@ export class Offsets {
     const nets = raw.netvars as
       Record<string, SigEntry | number | string> | undefined;
 
-    // collect module-keyed rva maps (cs2-dumper) AND flat sig entries
+    // collect module-keyed rva maps (cs2-dumper) AND flat sig entries.
+    // Module members filtered individually (m8); a name colliding with an
+    // already-collected entry throws rather than last-wins silently (m9).
     for (const [k, v] of Object.entries(raw)) {
       if (k === 'signatures' || k === 'netvars' || k === 'timestamp') continue;
       if (looksModule(k) && isModuleMap(v)) {
         const m = new Map<string, number>();
         for (const [name, rva] of Object.entries(v)) {
+          if (typeof rva !== 'number') continue; // skip non-rva members
           m.set(name, rva);
+          if (db.entries.has(name))
+            throw new MemoryProcessError(
+              `offset name "${name}" appears in multiple module maps — rename to disambiguate`,
+              'DUPLICATE_OFFSET_NAME',
+            );
           db.entries.set(name, { module: k, rva });
         }
         db.moduleRvps.set(k, m);
@@ -541,6 +563,7 @@ export class Offsets {
     for (const name of this.populated)
       delete (this as Record<string, unknown>)[name];
     this.populated.clear();
+    for (const k of Object.keys(this.failures)) delete this.failures[k];
     return this;
   }
 
@@ -551,7 +574,11 @@ export class Offsets {
    * entry names colliding with Offsets members throw rather than clobber them.
    */
   async ready(): Promise<this> {
-    if (!this.proc) throw new Error('Offsets is not bound to a Process');
+    if (!this.proc)
+      throw new MemoryProcessError(
+        'Offsets is not bound to a Process — call .bind(proc) or Offsets.of()',
+        'NOT_BOUND',
+      );
     if (this.resolved) return this;
     for (const name of this.keys()) {
       if (name in this)
@@ -565,8 +592,11 @@ export class Offsets {
         const addr = await this.resolve(name);
         (this as Record<string, unknown>)[name] = new Address(this.proc, addr);
         this.populated.add(name);
-      } catch {
-        // leave unresolved names as undefined — don't fail the whole ready()
+      } catch (e) {
+        // record — an unresolvable entry leaves `off[name]` undefined and the
+        // error discoverable via `off.failures`, rather than vanishing silently
+        // or aborting the whole ready().
+        this.failures[name] = e instanceof Error ? e : new Error(String(e));
       }
     }
     this.resolved = true;
@@ -586,7 +616,11 @@ export class Offsets {
   async resolve(name: string): Promise<bigint> {
     const hit = this.cache.get(name);
     if (hit !== undefined) return hit;
-    if (!this.proc) throw new Error('Offsets is not bound to a Process');
+    if (!this.proc)
+      throw new MemoryProcessError(
+        'Offsets is not bound to a Process — call .bind(proc) or Offsets.of()',
+        'NOT_BOUND',
+      );
 
     const e = this.entries.get(name);
     if (e === undefined)
@@ -599,7 +633,11 @@ export class Offsets {
       addr = await this.resolveSig(e);
     } else if (e.rva !== undefined) {
       const mod = this.proc.module(e.module ?? this.#firstModule());
-      if (!mod) throw new ScanError(0, `module ${e.module ?? '?'} for ${name}`);
+      if (!mod)
+        throw new MemoryProcessError(
+          `module ${e.module ?? '?'} for offset '${name}' not loaded`,
+          'MODULE_NOT_FOUND',
+        );
       addr = BigInt(mod.base) + BigInt(e.rva);
     } else {
       throw new MemoryProcessError(
@@ -627,7 +665,11 @@ export class Offsets {
 
   #firstModule(): string {
     const m = this.proc!.modules()[0];
-    if (!m) throw new ScanError(0, 'no modules loaded');
+    if (!m)
+      throw new MemoryProcessError(
+        'no modules loaded in target',
+        'MODULE_NOT_FOUND',
+      );
     return m.path.split(/[\\/]/).pop()!.toLowerCase();
   }
 
@@ -639,12 +681,22 @@ export class Offsets {
 
     const offs = e.offsets ?? [];
     const extra = BigInt(e.extra ?? 0);
+    // Every chain offset must be an integer — a float in the sig config
+    // surfaces as a cryptic BigInt RangeError otherwise (m11).
+    const step = (a: bigint, off: number): bigint => {
+      if (!Number.isInteger(off))
+        throw new MemoryProcessError(
+          `invalid offset ${off} in sig chain — offsets must be integers`,
+          'INVALID_OFFSET_ENTRY',
+        );
+      return proc.readPointer(a) + BigInt(off);
+    };
 
     if (e.relative) {
       // RIP-relative: displacement position defaults to +3 (mov rax,[rip+x]).
       const dispOff = offs[0] ?? 3;
       let a = proc.resolveRIPRelative(hit, dispOff);
-      for (const off of offs.slice(1)) a = proc.readPointer(a) + BigInt(off);
+      for (const off of offs.slice(1)) a = step(a, off);
       return a + extra;
     }
 
@@ -656,13 +708,13 @@ export class Offsets {
       if (e.read === 'u32') a = BigInt(proc.readUInt32(hit + BigInt(readOff)));
       else if (e.read === 'u64') a = proc.readUInt64(hit + BigInt(readOff));
       else a = proc.readPointer(hit + BigInt(readOff));
-      for (const off of offs.slice(1)) a = proc.readPointer(a) + BigInt(off);
+      for (const off of offs.slice(1)) a = step(a, off);
       return a + extra;
     }
 
     // Plain chain: walk the hit as a pointer chain.
     let a = hit;
-    for (const off of offs) a = proc.readPointer(a) + BigInt(off);
+    for (const off of offs) a = step(a, off);
     return a + extra;
   }
 }
@@ -851,7 +903,22 @@ export class Entity {
     const buf = Buffer.alloc(w);
     if (f.type === 'float') buf.writeFloatLE(Number(value));
     else if (f.type === 'double') buf.writeDoubleLE(Number(value));
-    else buf.writeUInt32LE(Number(value) >>> 0);
+    else {
+      // int32/uint32 — reject out-of-range rather than silently wrapping
+      // (>>>0 turns -1 into 0xFFFFFFFF, 0x1_0000_0001 into 1).
+      const n = Number(value);
+      if (!Number.isInteger(n))
+        throw new RangeError(`field ${name} needs an integer, got ${value}`);
+      if (f.type === 'int32') {
+        if (n < -0x80000000 || n > 0x7fffffff)
+          throw new RangeError(`field ${name}: int32 out of range ${n}`);
+        buf.writeInt32LE(n);
+      } else {
+        if (n < 0 || n > 0xffffffff)
+          throw new RangeError(`field ${name}: uint32 out of range ${n}`);
+        buf.writeUInt32LE(n);
+      }
+    }
     return this.proc.writeBuffer(at, buf);
   }
 }
@@ -913,7 +980,10 @@ export class EntityList implements Iterable<bigint | Entity> {
       return;
     }
 
-    // Linked: first is the address of the head pointer.
+    // Linked: first is the address of the head pointer. Track visited nodes —
+    // a malformed `next` chain that loops back on itself would otherwise yield
+    // duplicates until `max` is hit (bounded, but wasteful and wrong).
+    const visited = new Set<bigint>();
     let cur: bigint;
     try {
       cur = this.proc.readPointer(f + BigInt(next!));
@@ -921,7 +991,8 @@ export class EntityList implements Iterable<bigint | Entity> {
       return;
     }
     let n = 0;
-    while (cur !== 0n && n < max) {
+    while (cur !== 0n && n < max && !visited.has(cur)) {
+      visited.add(cur);
       yield schema ? new Entity(this.proc, cur, schema) : cur;
       try {
         cur = this.proc.readPointer(cur + BigInt(next!));
@@ -1003,6 +1074,20 @@ export function readMany(
     }
     for (const { idx, off, type, width } of list) {
       if (off + width > buf.length) continue;
+      // A request straddling into the NEXT page decodes readSafe's zero-fill
+      // as a real 0 — check the neighbour page is actually readable before
+      // trusting the tail bytes (the +8 read is always in-page, but a request
+      // AT offset 0xFFC+width>0x1000 reads into page+1's zero-fill).
+      if (off + width > 0x1000) {
+        const nq = proc.queryAddress(page * PAGE + PAGE);
+        if (
+          !nq ||
+          nq.state !== MEM_COMMIT ||
+          (nq.protection & UNREADABLE) !== 0 ||
+          (nq.protection & 0xff & readableMask) === 0
+        )
+          continue; // straddle page unreadable → null, not a false zero
+      }
       try {
         out[idx] =
           type === 'pointer'

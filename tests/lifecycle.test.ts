@@ -183,7 +183,19 @@ describe('H1 — timeout validation', () => {
     using proc = Process.open(victim.pid);
     expect(() => proc.callRemote(0n, 0, -1)).toThrow(TypeError);
     expect(() => proc.callRemote(0n, 0, Number.NaN)).toThrow(TypeError);
-    expect(() => proc.callRemote(0n, 0, 500)).not.toThrow(TypeError);
+  });
+
+  test('callRemote valid timeout does NOT throw TypeError (dedicated victim — remote AV is fatal)', async () => {
+    // callRemote(0) makes the remote thread AV → target dies. That's inherent
+    // to CreateRemoteThread; use a throwaway victim so the shared one survives.
+    const v = await spawnVictim();
+    try {
+      const p = Process.open(v.pid);
+      expect(() => p.callRemote(0n, 0, 500)).not.toThrow(TypeError);
+      p.close();
+    } finally {
+      v.kill();
+    }
   });
 
   test('execShellcode negative timeout → TypeError', () => {

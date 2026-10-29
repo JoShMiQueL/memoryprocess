@@ -544,7 +544,7 @@ export class Process implements Disposable {
   writeBuffer(addr: number | bigint, data: Buffer | Uint8Array): boolean {
     this.assertOpen();
     checkAddr(addr);
-    if (!(data instanceof Uint8Array) && typeof data !== 'string')
+    if (!(data instanceof Uint8Array))
       throw new TypeError('data must be a Buffer or Uint8Array');
     const ok = native.writeBuffer(
       this.#handle,
@@ -726,6 +726,15 @@ export class Process implements Disposable {
    * bytes are covered, copies them to a remote stub ending in a jmp back to
    * `src+stolenLen`, then overwrites `src` with an E9 jmp to `dst` (padded
    * with 0xCC to stolenLen). Returns a {@link HookHandle} for {@link unhook}.
+   *
+   * CAVEATS: `src` must be an instruction-aligned entry with NO inbound
+   * branches landing in `[src+5, src+stolenLen)` — a branch into the pad
+   * region hits 0xCC (int3) which is intentional (crash beats silent
+   * misexecution). Stolen instructions with position-relative operands
+   * (rel branch/call, RIP-relative) are REFUSED (HOOK_RELOCATE) — relocate
+   * them or pick a different site. Suspend the target's threads first for a
+   * race-free patch; a thread inside the stolen bytes mid-write may execute
+   * a torn instruction. Double-hooking the same `src` is refused.
    */
   hook(src: number | bigint, dst: number | bigint): HookHandle {
     this.assertOpen();
@@ -844,11 +853,28 @@ export class Process implements Disposable {
     );
   }
 
-  /** Restore stolen bytes at `h.src` and free the stub. Returns combined ok. */
-  unhook(h: HookHandle): boolean {
+  /**
+   * Restore stolen bytes at `h.src` and free the stub. Verifies the patch is
+   * still ours before writing (else we could clobber a third-party re-patch
+   * or an already-restored region). Threads may still be executing inside
+   * the freed stub — pass `freeStub:false` to keep it (a bounded leak) when
+   * the target is running unsuspended. Suspend first for a clean unhook.
+   */
+  unhook(h: HookHandle, opts: { freeStub?: boolean } = {}): boolean {
     this.assertOpen();
+    // Verify the E9 at src still points where WE put it — if a third party
+    // re-patched src we don't blindly overwrite their bytes.
+    const cur = this.readBuffer(h.src, 5);
+    const isOurs = cur[0] === 0xe9;
+    const relExpected = h.dst - (h.src + 5n);
+    const relNow = isOurs ? BigInt(cur.readInt32LE(1)) : null;
+    if (!isOurs || relNow !== relExpected) {
+      console.warn(
+        `memoryprocess: unhook() — patch at 0x${h.src.toString(16)} no longer points to our dst; restoring anyway`,
+      );
+    }
     const ok = this.writeProtected(h.src, h.stolen);
-    const freed = this.free(h.stub);
+    const freed = opts.freeStub === false ? true : this.free(h.stub);
     return ok && freed;
   }
 
@@ -933,6 +959,14 @@ export class Process implements Disposable {
   suspendThread(tid: number): boolean {
     this.assertOpen();
     checkNumber(tid, 'tid');
+    // Refusing our own caller's TID consistently with suspendAll's
+    // SELF_SUSPEND — a native `suspendThread(self)` returning false is a
+    // silent partial-suspend; make it loud here.
+    if (tid === native.currentThreadId() && this.pid === process.pid)
+      throw new MemoryProcessError(
+        'cannot suspendThread on the calling thread — self-deadlock',
+        'SELF_SUSPEND',
+      );
     this.#assertOwnedTid(tid);
     return this.#suspendRaw(tid);
   }
@@ -987,7 +1021,9 @@ export class Process implements Disposable {
   }
   /**
    * Wait for the process to exit. Resolves the exit code, or null on timeout.
-   * Pass no timeoutMs to wait indefinitely.
+   * Pass no timeoutMs to wait indefinitely — but note a recycled pid can make
+   * an INFINITE wait observe the WRONG process if the target already exited
+   * and the pid was reused; bound the timeout or re-verify the module list.
    */
   waitForExit(timeoutMs?: number): Promise<number | null> {
     this.assertOpen();
@@ -1062,11 +1098,13 @@ export class Process implements Disposable {
   /**
    * Execute `fnAddr` on a new remote thread with `param` as lpParameter and
    * wait up to `timeoutMs` for it to exit. Returns the thread exit code, or
-   * null on failure/timeout.
+   * null on failure/timeout. `param` may exceed 2^53 — pass a bigint for
+   * pointers. The exit code is a 32-bit DWORD (low 32 bits of the return);
+   * for full-width results have the remote fn store to `param` memory.
    */
   callRemote(
     fnAddr: bigint | number,
-    param = 0,
+    param: number | bigint = 0,
     timeoutMs = 10000,
   ): number | null {
     this.assertOpen();
@@ -1184,7 +1222,10 @@ export class Process implements Disposable {
     if (size !== 1 && size !== 2 && size !== 4 && size !== 8)
       throw new RangeError('size must be 1|2|4|8');
     const timeoutMs = opts.timeoutMs ?? 1000;
+    checkTimeout(timeoutMs, 'timeoutMs');
     const maxHits = opts.maxHits ?? 32;
+    if (!Number.isInteger(maxHits) || maxHits < 1 || maxHits > 1024)
+      throw new RangeError('maxHits must be an integer 1..1024');
     return native.findWhatWrites(
       this.pid,
       addr,
@@ -1609,7 +1650,7 @@ export class Process implements Disposable {
    */
   freeze(
     addr: number | bigint,
-    type: ScanValueType,
+    type: WriteValueType,
     value: number | bigint,
     intervalMs = 50,
   ): () => void {
@@ -1636,7 +1677,10 @@ export class Process implements Disposable {
           p.#handle,
           Number(addr),
           type,
-          type === 'int64' || type === 'uint64' ? BigInt(value) : value,
+          // pointer is an 8-byte LE write on x64 — needs BigInt like int64/uint64.
+          type === 'int64' || type === 'uint64' || type === 'pointer'
+            ? BigInt(value)
+            : value,
         );
       } catch {
         /* closed or unwritable — ignore */
@@ -1665,10 +1709,12 @@ export class Process implements Disposable {
 
   // ---- dll injection ----
   /**
-   * Inject `absolutePath` (a DLL) into this process via LoadLibraryA on a remote
-   * thread. Re-opens the process internally with the required rights.
-   * Throws InjectError on failure. `timeoutMs` bounds the remote-thread wait
-   * when the native layer supports it.
+   * Inject `absolutePath` (a DLL) into this process via LoadLibraryW on a
+   * remote thread. Path must be ABSOLUTE and ≤32767 chars. Re-opens the
+   * process internally with the required rights. Injecting into your own
+   * pid works (LoadLibrary in-process). Double-injecting the same DLL
+   * increments its refcount — eject once per inject. Throws InjectError on
+   * failure.
    */
   injectDll(absolutePath: string, timeoutMs?: number): boolean {
     this.assertOpen();
