@@ -125,6 +125,33 @@ export interface ScanValueOptions {
   alignment?: number;
 }
 
+/**
+ * One hit of a value scan: the address plus the value observed there. CE's
+ * hit-list model — `value` is what makes relative refines ("changed",
+ * "increased", ...) possible: `nextScan` compares the re-read value against
+ * `hit.value`, not against a user-supplied target.
+ */
+export interface ScanHit {
+  addr: bigint;
+  value: number | bigint;
+}
+
+/**
+ * CE "next scan" modes. Relative modes compare the CURRENT value against the
+ * hit's stored `value`; 'exact'/'between' compare against the given target(s).
+ * 'range' is accepted as an alias of 'between'.
+ */
+export type NextScanMode =
+  | { type: 'exact'; value: number | bigint }
+  | { type: 'changed' }
+  | { type: 'unchanged' }
+  | { type: 'increased' }
+  | { type: 'decreased' }
+  | { type: 'increasedBy'; value: number | bigint }
+  | { type: 'decreasedBy'; value: number | bigint }
+  | { type: 'between'; lo: number | bigint; hi: number | bigint }
+  | { type: 'range'; lo: number | bigint; hi: number | bigint };
+
 // Convert a start/end bound to a finite number; undefined stays undefined so
 // the native side can apply its default. Non-finite or garbage input throws
 // rather than silently scanning [0, user-top] or nothing.
@@ -301,6 +328,10 @@ export class Process implements Disposable {
   // enumeration costs a full Toolhelp snapshot (~86µs); addr()/pointers()/
   // Offsets hit it once per entry without this cache.
   #modCache?: { list: ModuleInfo[]; byName: Map<string, ModuleInfo> };
+  // hook() registry — refuses stacking a second hook on the same src (the
+  // first's unhook would restore pre-hook bytes under the second's patch,
+  // orphaning its stub). Cleared per unhook.
+  #hookedSrcs = new Set<bigint>();
 
   private constructor(handle: number, pid: number) {
     this.#handle = handle;
@@ -703,7 +734,7 @@ export class Process implements Disposable {
   disassemble(
     addr: number | bigint,
     count: number,
-  ): { address: bigint; size: number; bytes: Buffer }[] {
+  ): { address: bigint; size: number; bytes: Buffer; relative: boolean }[] {
     this.assertOpen();
     checkAddr(addr);
     checkNumber(count, 'count');
@@ -718,23 +749,30 @@ export class Process implements Disposable {
       address: base + BigInt(i.offset),
       size: i.length,
       bytes: Buffer.from(raw.subarray(i.offset, i.offset + i.length)),
+      /** true when the instruction is position-dependent (rel branch/call or RIP-relative operand) */
+      relative: i.relative,
     }));
   }
 
   /**
-   * Classic trampoline hook: steals whole instructions at `src` until >=5
-   * bytes are covered, copies them to a remote stub ending in a jmp back to
-   * `src+stolenLen`, then overwrites `src` with an E9 jmp to `dst` (padded
-   * with 0xCC to stolenLen). Returns a {@link HookHandle} for {@link unhook}.
+   * Classic trampoline hook: allocates an RWX stub within rel32 range of
+   * `src`, steals whole instructions until >=5 bytes are covered REWRITING
+   * position-relative operands for the stub's address (MinHook-style:
+   * rel32 branch/call + RIP-relative disp32 are relocated; internal
+   * branches that stay inside the stolen window copy verbatim), appends a
+   * jmp back to `src+stolenLen`, then overwrites `src` with an E9 jmp to
+   * `dst` (padded with 0xCC). Returns a {@link HookHandle} for {@link unhook}.
    *
    * CAVEATS: `src` must be an instruction-aligned entry with NO inbound
    * branches landing in `[src+5, src+stolenLen)` — a branch into the pad
    * region hits 0xCC (int3) which is intentional (crash beats silent
-   * misexecution). Stolen instructions with position-relative operands
-   * (rel branch/call, RIP-relative) are REFUSED (HOOK_RELOCATE) — relocate
-   * them or pick a different site. Suspend the target's threads first for a
-   * race-free patch; a thread inside the stolen bytes mid-write may execute
-   * a torn instruction. Double-hooking the same `src` is refused.
+   * misexecution). External rel8/rel16 branches (incl. LOOP/JECXZ) and
+   * rewrites that can't reach ±2GB from the stub are REFUSED
+   * (HOOK_RELOCATE) — hook a different site or pre-relocate the operands.
+   * Suspend the target's threads first for a race-free patch; a thread
+   * inside the stolen bytes mid-write may execute a torn instruction.
+   * Re-hooking the same `src` through this Process is refused
+   * (HOOK_ALREADY) — chained stubs break unhook ordering.
    */
   hook(src: number | bigint, dst: number | bigint): HookHandle {
     this.assertOpen();
@@ -742,29 +780,31 @@ export class Process implements Disposable {
     checkAddr(dst, 'dst');
     const s = BigInt(src),
       d = BigInt(dst);
-    // hookSteal refuses position-relative instructions (rel branches/calls,
-    // RIP-relative operands) that would execute at the wrong address when
-    // copied verbatim to the stub — this also cleanly rejects double-hooking
-    // (our own E9 patch decodes as position-relative). Throws HOOK_STEAL/
-    // HOOK_RELOCATE and returns the stolen bytes in one remote read.
-    const { length: stolenLen, bytes: stolen } = native.hookSteal(
-      this.#handle,
-      Number(s),
-      5,
-    );
+    if (this.#hookedSrcs.has(s)) {
+      const err = new Error(
+        `hook: src 0x${s.toString(16)} is already hooked by this Process — ` +
+          'unhook first (stacked hooks break unhook ordering)',
+      ) as Error & { code?: string };
+      err.code = 'HOOK_ALREADY';
+      throw err;
+    }
 
-    // The stub needs to reach `s` with a rel32 jmp-back, so it MUST land
-    // within ±2GB of `src`. Hint VirtualAllocEx at candidate pages inside the
-    // window; if the window is exhausted this throws rather than silently
-    // writing a truncated rel32.
-    const stub = this.#allocNear(
-      s,
-      stolenLen + 5,
-      Protection.PAGE_EXECUTE_READWRITE,
-    );
+    // Allocate the stub FIRST — hookSteal needs its address to rewrite
+    // position-relative operands. One page covers any stolen set (max 64B
+    // worth of instructions + 5B back-jump). The stub MUST land within ±2GB
+    // of `src` for the rel32 jmp-back AND for the rewrites to reach.
+    const stub = this.#allocNear(s, 0x1000, Protection.PAGE_EXECUTE_READWRITE);
+    let stolenLen = 0;
+    let stolen: Buffer;
     try {
+      const r = native.hookSteal(this.#handle, Number(s), 5, stub);
+      stolenLen = r.length;
+      // `bytes` is the relocated copy destined for the stub; `original` is
+      // the pristine prologue — unhook MUST restore the original (the victim
+      // crashed in round-1 when the relocated rel32 was written back to src).
+      stolen = r.original;
       const back = Buffer.alloc(stolenLen + 5);
-      stolen.copy(back, 0);
+      r.bytes.copy(back, 0); // relocated copy into the stub
       back[stolenLen] = 0xe9;
       const relBack = s + BigInt(stolenLen) - (stub + BigInt(stolenLen) + 5n);
       checkRel32(relBack);
@@ -788,6 +828,7 @@ export class Process implements Disposable {
       throw e;
     }
 
+    this.#hookedSrcs.add(s);
     return { src: s, dst: d, stub, stolen };
   }
 
@@ -875,6 +916,7 @@ export class Process implements Disposable {
     }
     const ok = this.writeProtected(h.src, h.stolen);
     const freed = opts.freeStub === false ? true : this.free(h.stub);
+    this.#hookedSrcs.delete(h.src);
     return ok && freed;
   }
 
@@ -1522,11 +1564,13 @@ export class Process implements Disposable {
    * Cheat-Engine-style typed value scan: find all (aligned) little-endian
    * occurrences of `value` in committed memory. Default scans writable
    * regions only — pass `onlyWritable: false` to include read-only data.
+   * Returns `{addr, value}` hits — keep them: `nextScan` relative modes
+   * compare against each hit's stored value.
    */
   async scanValue(
     value: number | bigint,
     opts: ScanValueOptions = {},
-  ): Promise<bigint[]> {
+  ): Promise<ScanHit[]> {
     this.assertOpen();
     const type = opts.type ?? 'int32';
     if (!VALID_SCAN_TYPES.includes(type))
@@ -1542,19 +1586,34 @@ export class Process implements Disposable {
       start = m.base;
       end = m.base + m.size;
     }
-    return native.scanValue(this.pid, needle, {
+    const addrs = await native.scanValue(this.pid, needle, {
       start,
       end,
       onlyWritable: opts.onlyWritable ?? true,
       alignment: opts.alignment ?? VALUE_WIDTHS[type],
     });
+    // Every hit equals the needle by construction — the stored value is the
+    // needle itself, decoded once here (cheap; avoids a per-hit decode).
+    const decoded = decodeValue(needle, 0, type);
+    return addrs.map((addr) => ({ addr, value: decoded }));
   }
 
   /**
-   * Refine a previous scan (CE "next scan"): re-reads each hit and keeps only
-   * addresses whose current value still equals `value` (or falls inside
-   * `opts.range = [lo, hi]` — CE "value between"). Reads are batched one
-   * readSafe per 4KB page group, so it's fast on large hit lists.
+   * Refine a previous scan (CE "next scan"): re-reads each hit's current
+   * value and keeps the ones matching `mode`. Returns fresh ScanHits whose
+   * `value` is the NEW reading, so chaining refines (scan → changed →
+   * increased → ...) always compares consecutive snapshots like CE does.
+   *
+   * Modes:
+   *  - `{type:'exact', value}`            — current value == value (1e-6 float tol)
+   *  - `{type:'changed'|'unchanged'}`     — vs the hit's stored value
+   *  - `{type:'increased'|'decreased'}`   — numeric compare vs stored value
+   *  - `{type:'increasedBy'|'decreasedBy', value}` — delta compare
+   *  - `{type:'between'|'range', lo, hi}` — CE "value between"
+   *
+   * Bare-address convenience: a plain `bigint[]` or `{addr}`-shaped array is
+   * accepted for 'exact'/'between' modes; relative modes REQUIRE the stored
+   * value and throw on hits that lack it.
    *
    * NOTE — close() mid-scan: a page whose read fails (incl. the process
    * handle closing between batches) is silently SKIPPED, so a late close()
@@ -1562,13 +1621,14 @@ export class Process implements Disposable {
    * after awaiting if that distinction matters.
    */
   async nextScan(
-    hits: readonly bigint[],
-    value: number | bigint,
+    hits: readonly (ScanHit | bigint | number)[],
+    mode: NextScanMode | number | bigint,
     opts: {
       type?: ScanValueType;
+      /** legacy alias for `{type:'between', lo, hi}` */
       range?: [number | bigint, number | bigint];
     } = {},
-  ): Promise<bigint[]> {
+  ): Promise<ScanHit[]> {
     this.assertOpen();
     if (hits.length === 0) return [];
     const type = opts.type ?? 'int32';
@@ -1576,34 +1636,95 @@ export class Process implements Disposable {
       throw new TypeError(
         `invalid nextScan type ${type} — use one of ${VALID_SCAN_TYPES.join('/')}`,
       );
+
+    // Normalise: a bare number/bigint mode is the legacy "exact" call shape;
+    // opts.range maps to 'between'.
+    let m: NextScanMode;
+    if (typeof mode === 'number' || typeof mode === 'bigint') {
+      m = opts.range
+        ? { type: 'between', lo: opts.range[0], hi: opts.range[1] }
+        : { type: 'exact', value: mode };
+    } else {
+      m = mode;
+    }
+
+    const needsPrev =
+      m.type === 'changed' ||
+      m.type === 'unchanged' ||
+      m.type === 'increased' ||
+      m.type === 'decreased' ||
+      m.type === 'increasedBy' ||
+      m.type === 'decreasedBy';
+
     const width = VALUE_WIDTHS[type];
     const PAGE = 0x1000n;
 
-    // group hits by 4KB page
-    const byPage = new Map<bigint, { hit: bigint; off: number }[]>();
+    // group hits by 4KB page — retain each hit's stored value (may be absent
+    // for bare-address input)
+    const byPage = new Map<
+      bigint,
+      { hit: bigint; prev: number | bigint | undefined; off: number }[]
+    >();
     for (const h of hits) {
-      const page = BigInt(h) / PAGE;
-      const off = Number(BigInt(h) % PAGE);
+      const hit = typeof h === 'object' && h !== null ? h : { addr: BigInt(h) };
+      const addr = BigInt(hit.addr);
+      const prev = 'value' in hit ? hit.value : undefined;
+      if (needsPrev && prev === undefined)
+        throw new TypeError(
+          `nextScan mode '${m.type}' needs ScanHit[] with stored values — ` +
+            `feed it the result of scanValue/nextScan, not bare addresses`,
+        );
+      const page = addr / PAGE;
+      const off = Number(addr % PAGE);
       let g = byPage.get(page);
       if (!g) {
         g = [];
         byPage.set(page, g);
       }
-      g.push({ hit: BigInt(h), off });
+      g.push({ hit: addr, prev, off });
     }
 
     const isFloat = type === 'float' || type === 'double';
-    const matches = (v: number | bigint): boolean => {
-      if (opts.range) {
-        const [lo, hi] = opts.range;
-        if (isFloat) return Number(v) >= Number(lo) && Number(v) <= Number(hi);
-        return BigInt(v) >= BigInt(lo) && BigInt(v) <= BigInt(hi);
+    const num = (v: number | bigint): number => Number(v);
+    const big = (v: number | bigint): bigint => BigInt(v);
+    const matches = (
+      cur: number | bigint,
+      prev: number | bigint | undefined,
+    ): boolean => {
+      switch (m.type) {
+        case 'exact':
+          return isFloat
+            ? Math.abs(num(cur) - num(m.value)) < 1e-6
+            : big(cur) === big(m.value);
+        case 'between':
+        case 'range':
+          return isFloat
+            ? num(cur) >= num(m.lo) && num(cur) <= num(m.hi)
+            : big(cur) >= big(m.lo) && big(cur) <= big(m.hi);
+        case 'changed':
+          return isFloat ? num(cur) !== num(prev!) : big(cur) !== big(prev!);
+        case 'unchanged':
+          return isFloat ? num(cur) === num(prev!) : big(cur) === big(prev!);
+        case 'increased':
+          return isFloat ? num(cur) > num(prev!) : big(cur) > big(prev!);
+        case 'decreased':
+          return isFloat ? num(cur) < num(prev!) : big(cur) < big(prev!);
+        case 'increasedBy':
+          return isFloat
+            ? num(cur) - num(prev!) === num(m.value)
+            : big(cur) - big(prev!) === big(m.value);
+        case 'decreasedBy':
+          return isFloat
+            ? num(prev!) - num(cur) === num(m.value)
+            : big(prev!) - big(cur) === big(m.value);
+        default:
+          throw new TypeError(
+            `unknown nextScan mode ${(m as { type: string }).type}`,
+          );
       }
-      if (isFloat) return Math.abs(Number(v) - Number(value)) < 1e-6;
-      return BigInt(v) === BigInt(value);
     };
 
-    const out: bigint[] = [];
+    const out: ScanHit[] = [];
     const pages = [...byPage.entries()];
     const BATCH = 64;
     for (let i = 0; i < pages.length; i += BATCH) {
@@ -1624,10 +1745,11 @@ export class Process implements Disposable {
       for (let j = 0; j < slice.length; j++) {
         const buf = bufs[j];
         if (!buf) continue;
-        for (const { hit, off } of slice[j]![1]) {
+        for (const { hit, prev, off } of slice[j]![1]) {
           if (off + width > buf.length) continue;
           try {
-            if (matches(decodeValue(buf, off, type))) out.push(hit);
+            const cur = decodeValue(buf, off, type);
+            if (matches(cur, prev)) out.push({ addr: hit, value: cur });
           } catch {
             /* unreadable tail */
           }

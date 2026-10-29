@@ -143,9 +143,39 @@ for (const m of proc.modules()) console.log(m.path, '0x' + m.base.toString(16));
 
 | Method      | Signature                                  | Description                                        |
 | ----------- | ------------------------------------------ | -------------------------------------------------- |
-| `scanValue` | `(value, opts?) → Promise<bigint[]>`       | Exact typed value scan (default: writable regions) |
-| `nextScan`  | `(hits, value, opts?) → Promise<bigint[]>` | Refine hits by current value, or `range: [lo, hi]` |
+| `scanValue` | `(value, opts?) → Promise<ScanHit[]>`      | Exact typed value scan (default: writable regions) |
+| `nextScan`  | `(hits, mode, opts?) → Promise<ScanHit[]>` | Refine hits — CE next-scan modes (see below)       |
 | `freeze`    | `(addr, type, value, ms?) → () => void`    | Re-write `value` every `ms`; returns unfreeze fn   |
+
+`ScanHit = { addr: bigint, value: number | bigint }` — hits carry the observed
+value, so `nextScan` relative modes compare against the previous reading just
+like CE's hit list. `nextScan` returns fresh hits with the NEW value, so
+chained refines compare consecutive snapshots.
+
+`nextScan` modes (`NextScanMode`):
+
+```ts
+{
+  type: ('exact', value);
+} // current == value (1e-6 float tolerance)
+{
+  type: 'changed' | 'unchanged';
+} // vs the hit's stored value
+{
+  type: 'increased' | 'decreased';
+} // numeric compare vs stored value
+{
+  type: ('increasedBy' | 'decreasedBy', value);
+} // delta compare
+{
+  type: ('between' | 'range', lo, hi);
+} // CE "value between"
+```
+
+Relative modes need the stored value — pass the `ScanHit[]` from
+`scanValue`/`nextScan` (bare `bigint[]` addresses are still accepted for
+`exact`/`between`). The legacy call `nextScan(hits, value, { range })` maps to
+`exact`/`between`.
 
 `scanValue` opts: `{ type?, module?, start?, end?, onlyWritable?, alignment? }`.
 Types: `'int32' | 'uint32' | 'int64' | 'uint64' | 'float' | 'double'` (`'pointer'` is write-only — rejected by scans).

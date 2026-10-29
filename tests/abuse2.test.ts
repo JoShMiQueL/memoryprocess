@@ -294,10 +294,10 @@ describe('scan abuse', () => {
       start: base,
       end: base + 0x2000n,
     });
-    expect(hits).toContain(base);
+    expect(hits.map((h) => h.addr)).toContain(base);
     proc.free(base);
     const kept = await proc.nextScan(hits, 0x41414141n, { type: 'int64' });
-    expect(kept).not.toContain(base);
+    expect(kept.map((h) => h.addr)).not.toContain(base);
   });
   test('scan with start > end → benign (empty or throw)', async () => {
     using proc = Process.open(victim.pid);

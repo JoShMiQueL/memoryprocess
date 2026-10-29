@@ -444,6 +444,13 @@ export class Offsets {
     const looksModule = (k: string) => /\.(dll|exe)$/i.test(k);
 
     const add = (name: string, e: SigEntry | number | string) => {
+      // A signature/flat entry must not silently clobber a module-map rva of
+      // the same name (m9 was one-direction-only). Throw on any collision.
+      if (db.entries.has(name))
+        throw new MemoryProcessError(
+          `offset name "${name}" defined more than once — rename to disambiguate`,
+          'DUPLICATE_OFFSET_NAME',
+        );
       if (typeof e === 'number') {
         db.entries.set(name, e);
         return;
@@ -1118,12 +1125,14 @@ export function findPointersTo(
     alignment?: number;
   } = {},
 ): Promise<bigint[]> {
-  return proc.scanValue(BigInt(target), {
-    type: proc.pointerSize === 4 ? 'uint32' : 'uint64',
-    module: opts.module,
-    start: opts.start,
-    end: opts.end,
-    onlyWritable: opts.onlyWritable ?? true,
-    alignment: opts.alignment ?? proc.pointerSize,
-  });
+  return proc
+    .scanValue(BigInt(target), {
+      type: proc.pointerSize === 4 ? 'uint32' : 'uint64',
+      module: opts.module,
+      start: opts.start,
+      end: opts.end,
+      onlyWritable: opts.onlyWritable ?? true,
+      alignment: opts.alignment ?? proc.pointerSize,
+    })
+    .then((hits) => hits.map((h) => h.addr));
 }

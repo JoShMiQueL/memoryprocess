@@ -115,8 +115,8 @@ describe('hook / unhook', () => {
       const h2 = addr;
       const g = addr + 0x100n;
       // first instruction is 10 bytes (mov rax,imm64); hook must steal >=10,
-      // never 5. (The old test used a RIP-relative mov — hookSteal now REFUSES
-      // those, which is the point of the fix: see 'refuses RIP-relative' test.)
+      // never 5. (A RIP-relative mov is also fine here — hookSteal now
+      // RELOCATES those: see 'relocates RIP-relative' test.)
       const MOV_RAX_IMM64 = [
         0x48, 0xb8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11,
       ];
@@ -131,14 +131,16 @@ describe('hook / unhook', () => {
     }
   });
 
-  test('refuses to steal position-relative instructions (relocate unsafe)', () => {
+  test('rel8 external branch in stolen set → HOOK_RELOCATE (cannot widen)', () => {
     using proc = Process.open(victim.pid);
     const addr = proc.alloc(0x1000, Protection.EXECUTE_READWRITE);
     try {
       const g = addr + 0x100n;
-      // mov rax,[rip+disp] — RIP-relative operand: copying it verbatim into a
-      // stub at a different address reads the WRONG location → hook must refuse.
-      proc.writeBuffer(addr, Buffer.from([...MOV_RAX_RIP, 0x90, 0x90, 0xc3]));
+      // EB <rel8> jmp to OUTSIDE the page then ret — rel8 can't be widened to
+      // a same-length rewrite from a far stub → still refused (MinHook-level
+      // limitation; rel32 + RIP-rel DO relocate now).
+      const code = Buffer.from([0xeb, 0x7e, 0x90, 0x90, 0x90, 0x90, 0xc3]);
+      proc.writeBuffer(addr, code);
       proc.writeBuffer(g, Buffer.from(RET_99));
       expect(() => proc.hook(addr, g)).toThrow(
         /relocat|position-relative|HOOK/i,
@@ -148,7 +150,7 @@ describe('hook / unhook', () => {
     }
   });
 
-  test('double-hook refused — own E9 patch decodes as position-relative', () => {
+  test('double-hook refused — same src is tracked per-Process (HOOK_ALREADY)', () => {
     using proc = Process.open(victim.pid);
     const addr = proc.alloc(0x1000, Protection.EXECUTE_READWRITE);
     try {
@@ -157,9 +159,14 @@ describe('hook / unhook', () => {
       proc.writeBuffer(f, Buffer.from(RET_42));
       proc.writeBuffer(g, Buffer.from(RET_99));
       const h = proc.hook(f, g);
-      // second hook at the same src would steal our own E9 → refused cleanly.
+      // Second hook on the same src: relocation could steal our own E9
+      // correctly, but the unhook ordering is unfixable (restoring h1 would
+      // orphan h2's stub) — the Process registry refuses it up front.
       expect(() => proc.hook(f, g)).toThrow(/relocat|position-relative|HOOK/i);
       proc.unhook(h);
+      // Re-hooking after unhook is fine again.
+      const h2 = proc.hook(f, g);
+      proc.unhook(h2);
     } finally {
       proc.free(addr);
     }

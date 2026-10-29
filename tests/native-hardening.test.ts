@@ -6,8 +6,9 @@
  * Coverage:
  *   C3  suspendProcess(self) refused; suspendThread(self-tid) skipped;
  *       suspendAll(self) completes without hanging the caller
- *   C2  hookSteal refuses position-relative stolen bytes (E8/E9/EB/rel-jcc/
- *       RIP-rel operand) + double-hook detection at the native layer
+ *   C2  hookSteal relocates rel32/RIP-rel operands when given stubAddr;
+ *       external rel8/LOOP/JECXZ still refused; inspection mode (no
+ *       stubAddr) refuses all position-relative instrs
  *   C4  ejectDll: kernel32 (FreeLibrary FALSE) → InjectError; unknown → error;
  *       double-eject → error; base=0 → error
  *   H1  callRemote negative/huge timeoutMs → RangeError (no INFINITE wrap);
@@ -123,9 +124,9 @@ describe('C3 self-suspend refused', () => {
   });
 });
 
-/* ================= C2 — hookSteal relocation refusal ================= */
-describe('C2 hookSteal position-relative refusal', () => {
-  test('craft E8/E9/EB/0F84/74/RIP-rel pages in victim → all refused', () => {
+/* ================= C2 — hookSteal relocation ================= */
+describe('C2 hookSteal position-relative handling', () => {
+  test('inspection mode (no stubAddr): rel instrs still refused', () => {
     const PAGE = Protection.PAGE_EXECUTE_READWRITE;
     const cases: { name: string; bytes: number[] }[] = [
       { name: 'E8 rel32 call', bytes: [0xe8, 0x10, 0, 0, 0, 0xc3] },
@@ -157,6 +158,154 @@ describe('C2 hookSteal position-relative refusal', () => {
     }
   });
 
+  test('with stubAddr: E8/E9/0F84/RIP-rel RELOCATE — operand rewritten', () => {
+    const PAGE = Protection.PAGE_EXECUTE_READWRITE;
+    const cases: {
+      name: string;
+      bytes: number[];
+      opOff: number; // offset of the rel32/disp32 field within stolen bytes
+    }[] = [
+      { name: 'E8 rel32 call', bytes: [0xe8, 0x10, 0, 0, 0, 0xc3], opOff: 1 },
+      { name: 'E9 rel32 jmp', bytes: [0xe9, 0x10, 0, 0, 0, 0xc3], opOff: 1 },
+      {
+        name: '0F84 jcc rel32',
+        bytes: [0x0f, 0x84, 0x10, 0, 0, 0, 0xc3],
+        opOff: 2,
+      },
+      {
+        name: 'RIP-rel mov rax,[rip+..]',
+        bytes: [0x48, 0x8b, 0x05, 0x10, 0, 0, 0, 0xc3],
+        opOff: 3,
+      },
+    ];
+    for (const c of cases) {
+      const a = proc.alloc(0x100, PAGE);
+      const stub = proc.alloc(0x100, PAGE);
+      proc.writeBuffer(a, Buffer.from(c.bytes));
+      const r = nat.hookSteal(rawHandle, Number(a), 5, Number(stub)) as {
+        length: number;
+        bytes: Buffer;
+      };
+      proc.free(a);
+      proc.free(stub);
+      expect(r.length).toBeGreaterThanOrEqual(5);
+      // The rewritten operand must differ from the original — it now points
+      // from stubPos+len to the same absolute target.
+      expect(r.bytes.readInt32LE(c.opOff), c.name).not.toBe(0x10);
+    }
+  });
+
+  test('with stubAddr: external rel8/LOOP/JECXZ still refused', () => {
+    const PAGE = Protection.PAGE_EXECUTE_READWRITE;
+    const cases: { name: string; bytes: number[] }[] = [
+      {
+        name: 'EB rel8 jmp (external)',
+        bytes: [0xeb, 0x7f, 0x90, 0x90, 0x90, 0x90, 0xc3],
+      },
+      {
+        name: '74 rel8 jcc (external)',
+        bytes: [0x74, 0x7f, 0x90, 0x90, 0x90, 0x90, 0xc3],
+      },
+      {
+        name: 'E2 loop (external)',
+        bytes: [0xe2, 0x7f, 0x90, 0x90, 0x90, 0x90, 0xc3],
+      },
+      {
+        name: 'E3 jecxz (external)',
+        bytes: [0xe3, 0x7f, 0x90, 0x90, 0x90, 0x90, 0xc3],
+      },
+    ];
+    for (const c of cases) {
+      const a = proc.alloc(0x100, PAGE);
+      const stub = proc.alloc(0x100, PAGE);
+      proc.writeBuffer(a, Buffer.from(c.bytes));
+      const r = probe(() =>
+        nat.hookSteal(rawHandle, Number(a), 5, Number(stub)),
+      );
+      proc.free(a);
+      proc.free(stub);
+      expect(r.threw, `${c.name} should be refused`).toBe(true);
+      expect((r.err as any)?.code, c.name).toBe('HOOK_RELOCATE');
+    }
+  });
+
+  test('relocated rel32 call still reaches its target — functional', () => {
+    const PAGE = Protection.PAGE_EXECUTE_READWRITE;
+    const page = proc.alloc(0x400, PAGE);
+    try {
+      const callee = page + 0x200n; // mov eax,0x2A; ret
+      const fn = page; // call callee; ret
+      const hook = page + 0x180n; // mov eax,99; ret
+      proc.writeBuffer(callee, Buffer.from([0xb8, 0x2a, 0, 0, 0, 0xc3]));
+      const code = Buffer.alloc(0x40, 0x90);
+      code[0] = 0xe8;
+      code.writeInt32LE(Number(callee - (fn + 5n)), 1); // call callee
+      code[5] = 0xc3; // ret
+      proc.writeBuffer(fn, code.subarray(0, 6));
+      proc.writeBuffer(hook, Buffer.from([0xb8, 0x63, 0, 0, 0, 0xc3]));
+
+      expect(proc.callRemote(fn, 0)).toBe(42); // baseline: call works
+      const h = proc.hook(fn, hook);
+      expect(proc.callRemote(fn, 0)).toBe(99); // diverted
+      // The stub's relocated E8 must still call `callee` — running the stub
+      // directly returns 42 (eax survives as the thread exit code).
+      expect(proc.callRemote(h.stub, 0)).toBe(42);
+      expect(proc.unhook(h)).toBe(true);
+      expect(proc.callRemote(fn, 0)).toBe(42);
+    } finally {
+      proc.free(page);
+    }
+  });
+
+  test('relocated RIP-relative mov reads the original location', () => {
+    const PAGE = Protection.PAGE_EXECUTE_READWRITE;
+    const page = proc.alloc(0x400, PAGE);
+    try {
+      const fn = page; // mov rax,[rip+disp]; ret — reads qword at page+0x40
+      const hook = page + 0x100n;
+      const data = page + 0x40n;
+      proc.writeBuffer(
+        data,
+        Buffer.from([0xef, 0xbe, 0xad, 0x0b, 0, 0, 0, 0]), // 0x0BADBEEF
+      );
+      const code = Buffer.from([0x48, 0x8b, 0x05, 0, 0, 0, 0, 0xc3]);
+      code.writeInt32LE(Number(data - (fn + 7n)), 3); // disp32 → data
+      proc.writeBuffer(fn, code);
+      proc.writeBuffer(hook, Buffer.from([0xb8, 0x63, 0, 0, 0, 0xc3]));
+
+      const h = proc.hook(fn, hook);
+      // Stub executes relocated mov → eax = 0x0BADBEEF read from the ORIGINAL
+      // data address, then back-jump → ret. Exit code = eax.
+      expect(proc.callRemote(h.stub, 0)).toBe(0x0badbeef);
+      proc.unhook(h);
+    } finally {
+      proc.free(page);
+    }
+  });
+
+  test('internal rel8 branch (target inside stolen window) copies verbatim', () => {
+    const PAGE = Protection.PAGE_EXECUTE_READWRITE;
+    const page = proc.alloc(0x400, PAGE);
+    try {
+      const fn = page;
+      const hook = page + 0x100n;
+      // EB 01 (jmp +1 over the nop) → mov eax,42; ret — the branch target is
+      // INSIDE the stolen window, so a verbatim copy stays correct.
+      proc.writeBuffer(
+        fn,
+        Buffer.from([0xeb, 0x01, 0x90, 0xb8, 0x2a, 0, 0, 0, 0xc3]),
+      );
+      proc.writeBuffer(hook, Buffer.from([0xb8, 0x63, 0, 0, 0, 0xc3]));
+      const h = proc.hook(fn, hook);
+      expect(h.stolen.length).toBe(8);
+      // Stub: EB 01 skips the copied nop, mov eax,42 runs, back-jump → ret.
+      expect(proc.callRemote(h.stub, 0)).toBe(42);
+      proc.unhook(h);
+    } finally {
+      proc.free(page);
+    }
+  });
+
   test('safe prologue bytes → returns length>=5 + bytes', () => {
     // push rbp (55); mov rbp,rsp (48 89 E5); sub rsp,0x10 (48 83 EC 10); ret
     const a = proc.alloc(0x100, Protection.PAGE_EXECUTE_READWRITE);
@@ -174,48 +323,22 @@ describe('C2 hookSteal position-relative refusal', () => {
     proc.free(a);
   });
 
-  test('double-hook site refused: E9 patch at src is position-relative', () => {
-    // Simulates a previously-hooked function: stealing our own E9 patch is
-    // what hook() on an already-hooked src would try — must be refused.
+  test('our own E9 patch is relocatable, but Process refuses re-hooking (HOOK_ALREADY)', () => {
+    // Native level: an E9 at src with stubAddr relocates fine (legit jmp
+    // thunks must be hookable) — double-hook protection lives in process.ts.
     const a = proc.alloc(0x100, Protection.PAGE_EXECUTE_READWRITE);
+    const stub = proc.alloc(0x100, Protection.PAGE_EXECUTE_READWRITE);
     proc.writeBuffer(
       a,
       Buffer.from([0xe9, 0x00, 0x10, 0x00, 0x00, 0xcc, 0xcc, 0xcc]),
     );
-    const r = probe(() => nat.hookSteal(rawHandle, Number(a)));
+    const r = nat.hookSteal(rawHandle, Number(a), 5, Number(stub)) as {
+      length: number;
+      bytes: Buffer;
+    };
+    expect(r.length).toBe(5);
     proc.free(a);
-    expect(r.threw).toBe(true);
-    expect((r.err as any)?.code).toBe('HOOK_RELOCATE');
-  });
-
-  test('public hook() on E8-first site → refused when TS wires hookSteal', () => {
-    const a = proc.alloc(0x100, Protection.PAGE_EXECUTE_READWRITE);
-    proc.writeBuffer(a, Buffer.from([0xe8, 0x10, 0, 0, 0, 0xc3, 0xc3]));
-    const dst = proc.alloc(0x100, Protection.PAGE_EXECUTE_READWRITE);
-    proc.writeBuffer(dst, Buffer.from([0xc3]));
-    const r = probe(() => proc.hook(a, dst));
-    // The NATIVE layer (hookSteal, tested above) refuses — the public path
-    // refuses too once process.ts's hook() calls native.hookSteal (or checks
-    // the new `relative` flag on disasmInstructions). If hook() returned a
-    // handle, TS isn't wired yet: unhook to leave the victim clean and flag
-    // via a warning rather than a hard failure (other-agent dependency).
-    if (!r.threw) {
-      console.warn(
-        'native-hardening: public hook() did not refuse a position-relative ' +
-          'stolen set — process.ts hook() not yet wired to native.hookSteal',
-      );
-      try {
-        proc.unhook(r.val!);
-      } catch {
-        /* leave it */
-      }
-    } else {
-      expect((r.err as any)?.code ?? r.err?.message ?? '').toMatch(
-        /HOOK_RELOCATE|relative|relocat/i,
-      );
-    }
-    proc.free(a);
-    proc.free(dst);
+    proc.free(stub);
   });
 });
 

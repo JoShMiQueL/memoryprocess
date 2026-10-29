@@ -10,12 +10,16 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const exe = join(root, 'tests', 'victim.exe');
 const outFile = join(process.env.TEMP, 'mp-bench-victim.txt');
-try { execSync('taskkill /F /IM victim.exe', { stdio: 'ignore' }); } catch {}
+try {
+  execSync('taskkill /F /IM victim.exe', { stdio: 'ignore' });
+} catch {}
 const { openSync, closeSync } = await import('node:fs');
 const fd = openSync(outFile, 'w');
 const child = spawn(exe, [], { stdio: ['ignore', fd, 'inherit'] });
 await new Promise((r) => setTimeout(r, 1500));
-try { closeSync(fd); } catch {}
+try {
+  closeSync(fd);
+} catch {}
 const txt = readFileSync(outFile, 'utf8');
 const pid = Number(txt.match(/PID=(\d+)/)[1]);
 const addr = {};
@@ -24,7 +28,9 @@ for (const m of txt.matchAll(/&(g_\w+)=([0-9A-Fa-f]+)/g))
 
 const require = createRequire(import.meta.url);
 const native = require(join(root, 'dist', 'memoryprocess.node'));
-const { Process } = await import(pathToFileURL(join(root, 'dist', 'index.js')).href);
+const { Process } = await import(
+  pathToFileURL(join(root, 'dist', 'index.js')).href
+);
 
 const { handle } = native.openProcess(pid);
 const proc = Process.open(pid);
@@ -42,13 +48,19 @@ const timed = (label, fn, ms = 2000) => {
 };
 
 // 1. native scalar read (baseline)
-timed('native.readValue int32', () => native.readValue(handle, addr.g_i32, 'int32'));
+timed('native.readValue int32', () =>
+  native.readValue(handle, addr.g_i32, 'int32'),
+);
 // 2. HL readInt32 (TS wrapper)
 timed('proc.readInt32', () => proc.readInt32(addr.g_i32));
 // 3. native readBuffer 4KB
-timed('native.readBuffer 4KB', () => native.readBuffer(handle, addr.g_bigbuf, 4096));
+timed('native.readBuffer 4KB', () =>
+  native.readBuffer(handle, addr.g_bigbuf, 4096),
+);
 // 4. readSafe 4KB (region-walking path)
-timed('native.readSafe 4KB', () => native.readSafe(handle, addr.g_bigbuf, 4096));
+timed('native.readSafe 4KB', () =>
+  native.readSafe(handle, addr.g_bigbuf, 4096),
+);
 // 5. modules() — Toolhelp snapshot cost
 timed('proc.modules() (toolhelp)', () => proc.modules());
 // 6. module('victim.exe')
@@ -58,7 +70,9 @@ timed('native.queryAddress', () => native.queryAddress(handle, addr.g_i32));
 // 8. regions() full VA walk
 timed('proc.regions() full VA walk', () => proc.regions(), 1000);
 // 9. resolvePointer 3-chain (3 RPM)
-timed('resolvePointer 3-deep', () => proc.resolvePointer(addr.g_ppp, [0, 0, 0]));
+timed('resolvePointer 3-deep', () =>
+  proc.resolvePointer(addr.g_ppp, [0, 0, 0]),
+);
 // 10. readMany — 4 addresses scattered on ONE page (g_i32..g_wstr ~same page)
 timed('readMany 4 reqs same page', () =>
   proc.readMany([
@@ -96,18 +110,28 @@ timed('proc.writeInt32', () => proc.writeInt32(addr.g_i32, 42));
 {
   const mod = proc.module('victim.exe');
   const t0 = performance.now();
-  const hits = await native.scan(pid, 'DE AD', { start: mod.base, end: mod.base + mod.size });
+  const hits = await native.scan(pid, 'DE AD', {
+    start: mod.base,
+    end: mod.base + mod.size,
+  });
   const ms = performance.now() - t0;
-  results.push([`native.scan 2B in ${(mod.size / 1024).toFixed(0)}KiB`, `${ms.toFixed(1)}ms ${hits.length} hits`]);
+  results.push([
+    `native.scan 2B in ${(mod.size / 1024).toFixed(0)}KiB`,
+    `${ms.toFixed(1)}ms ${hits.length} hits`,
+  ]);
 }
 // 16. scanValue int32=42 over a 64MB heap region? skip — victim too small. Instead:
 // full writable-region value scan wall time for a unique value.
 {
   const t0 = performance.now();
-  const needle = Buffer.alloc(4); needle.writeInt32LE(0x11223344);
+  const needle = Buffer.alloc(4);
+  needle.writeInt32LE(0x11223344);
   const hits = await native.scanValue(pid, needle, { onlyWritable: true });
   const ms = performance.now() - t0;
-  results.push(['native.scanValue 0x11223344 all writable', `${ms.toFixed(0)}ms ${hits.length} hits`]);
+  results.push([
+    'native.scanValue 0x11223344 all writable',
+    `${ms.toFixed(0)}ms ${hits.length} hits`,
+  ]);
 }
 // 17. listThreads
 timed('proc.threads() (toolhelp)', () => proc.threads());

@@ -32,21 +32,26 @@ console.log(`scanValue(5000): ${hits.length} hit(s)`);
 // ── 2. the "game" changes — health drops, decoy doesn't ──────────────────
 proc.writeInt32(healthAddr, 3500); // simulate damage
 console.time('nextScan');
-hits = await proc.nextScan(hits, 3500, { type: 'int32' });
+// CE "decreased" — compares against each hit's stored value (5000)
+hits = await proc.nextScan(hits, { type: 'decreased' }, { type: 'int32' });
 console.timeEnd('nextScan');
-console.log(`nextScan(3500): ${hits.length} hit(s)`);
+console.log(`nextScan(decreased): ${hits.length} hit(s)`);
 
-// another round narrows further — 3500 → 1200
+// another round narrows further — 3500 → 1200 (exact, like CE "exact value")
 proc.writeInt32(healthAddr, 1200);
-hits = await proc.nextScan(hits, 1200, { type: 'int32' });
+hits = await proc.nextScan(
+  hits,
+  { type: 'exact', value: 1200 },
+  { type: 'int32' },
+);
 console.log(
-  `nextScan(1200): ${hits.length} hit(s) →`,
-  hits.map((h) => '0x' + h.toString(16)),
+  `nextScan(exact 1200): ${hits.length} hit(s) →`,
+  hits.map((h) => '0x' + h.addr.toString(16)),
 );
 
 // hits should now contain our planted address (noise hits that happened to
 // hold the same values can survive too — that's exactly like real CE use)
-if (!hits.includes(healthAddr)) {
+if (!hits.some((h) => h.addr === healthAddr)) {
   console.error('planted address was filtered out — something is wrong');
   proc.free(page);
   process.exit(1);

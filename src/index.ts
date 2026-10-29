@@ -4,6 +4,8 @@ export type {
   ModuleInfo,
   Region,
   ScanOptions,
+  ScanHit,
+  NextScanMode,
   ScanValueOptions,
   ScanValueType,
   WriteValueType,

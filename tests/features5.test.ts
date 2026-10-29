@@ -70,6 +70,8 @@ describe('read size validation', () => {
   });
 });
 
+const addrs = (hits: { addr: bigint }[]) => hits.map((h) => h.addr);
+
 describe('scanValue', () => {
   test('finds a unique private sentinel in writable memory', async () => {
     using proc = Process.open(victim.pid);
@@ -77,7 +79,10 @@ describe('scanValue', () => {
     try {
       proc.writeInt32(buf, 0x5aa5cc33);
       const hits = await proc.scanValue(0x5aa5cc33, { type: 'int32' });
-      expect(hits).toContain(buf);
+      expect(addrs(hits)).toContain(buf);
+      // hits carry the decoded value — the CE hit-list model
+      const mine = hits.find((h) => h.addr === buf)!;
+      expect(mine.value).toBe(0x5aa5cc33);
     } finally {
       proc.free(buf);
     }
@@ -93,22 +98,25 @@ describe('scanValue', () => {
         module: undefined,
       });
       expect(hits.length).toBeGreaterThan(0);
-      expect(hits).toContain(buf);
+      expect(addrs(hits)).toContain(buf);
+      expect(hits.find((h) => h.addr === buf)!.value).toBeCloseTo(87.5);
     } finally {
       proc.free(buf);
     }
   });
 
-  test('int64 / double scans hit their needles', async () => {
+  test('int64 / double scans hit their needles with decoded values', async () => {
     using proc = Process.open(victim.pid);
     const buf = proc.alloc(0x1000, Protection.PAGE_READWRITE);
     try {
       proc.writeInt64(buf, 0x0102030405060708n);
       proc.writeDouble(buf + 0x40n, 1337.125);
       const h64 = await proc.scanValue(0x0102030405060708n, { type: 'int64' });
-      expect(h64).toContain(buf);
+      expect(addrs(h64)).toContain(buf);
+      expect(h64.find((h) => h.addr === buf)!.value).toBe(0x0102030405060708n);
       const hd = await proc.scanValue(1337.125, { type: 'double' });
-      expect(hd).toContain(buf + 0x40n);
+      expect(addrs(hd)).toContain(buf + 0x40n);
+      expect(hd.find((h) => h.addr === buf + 0x40n)!.value).toBe(1337.125);
     } finally {
       proc.free(buf);
     }
@@ -116,18 +124,28 @@ describe('scanValue', () => {
 });
 
 describe('nextScan (refine)', () => {
-  test('keeps only hits whose value still matches after mutation', async () => {
+  test('exact mode keeps only hits whose value still matches after mutation', async () => {
     using proc = Process.open(victim.pid);
     const buf = proc.alloc(0x1000, Protection.PAGE_READWRITE);
     try {
       proc.writeInt32(buf, 0x1111_2222);
       proc.writeInt32(buf + 0x40n, 0x1111_2222);
-      const hits = [buf, buf + 0x40n, buf + 0x80n];
+      const hits = [buf, buf + 0x40n, buf + 0x80n]; // bare addresses still OK for exact
       proc.writeInt32(buf + 0x40n, 0x9999); // mutate one
-      const refined = await proc.nextScan(hits, 0x1111_2222, { type: 'int32' });
-      expect(refined).toContain(buf);
-      expect(refined).not.toContain(buf + 0x40n);
-      expect(refined).not.toContain(buf + 0x80n);
+      const refined = await proc.nextScan(
+        hits,
+        { type: 'exact', value: 0x1111_2222 },
+        { type: 'int32' },
+      );
+      const ra = addrs(refined);
+      expect(ra).toContain(buf);
+      expect(ra).not.toContain(buf + 0x40n);
+      expect(ra).not.toContain(buf + 0x80n);
+      // and the surviving hit carries the re-read value
+      expect(refined.find((h) => h.addr === buf)!.value).toBe(0x1111_2222);
+      // legacy positional-value call shape still works
+      const legacy = await proc.nextScan(hits, 0x1111_2222, { type: 'int32' });
+      expect(addrs(legacy)).toEqual(ra);
     } finally {
       proc.free(buf);
     }
@@ -141,7 +159,140 @@ describe('nextScan (refine)', () => {
     const now = proc.readInt32(addr);
     if (now === cur) return; // unlucky timing window — skip rather than flake
     const refined = await proc.nextScan([addr], now, { type: 'int32' });
-    expect(refined).toEqual([addr]);
+    expect(addrs(refined)).toEqual([addr]);
+    expect(refined[0]!.value).toBe(now);
+  });
+
+  test('CE relative modes: changed/unchanged/increased/decreased/byDelta', async () => {
+    using proc = Process.open(victim.pid);
+    const buf = proc.alloc(0x1000, Protection.PAGE_READWRITE);
+    try {
+      // A = will stay, B = +10, C = -5
+      proc.writeInt32(buf, 100);
+      proc.writeInt32(buf + 0x40n, 200);
+      proc.writeInt32(buf + 0x80n, 300);
+      // Seed hit-list via a real (narrow) scan so ScanHit values are genuine.
+      const seed = async (addr: bigint) =>
+        (
+          await proc.scanValue(proc.readInt32(addr), {
+            type: 'int32',
+            start: addr,
+            end: addr + 4n,
+          })
+        )[0]!;
+      const list = [
+        await seed(buf),
+        await seed(buf + 0x40n),
+        await seed(buf + 0x80n),
+      ];
+      proc.writeInt32(buf + 0x40n, 210);
+      proc.writeInt32(buf + 0x80n, 295);
+
+      const changed = await proc.nextScan(
+        list,
+        { type: 'changed' },
+        {
+          type: 'int32',
+        },
+      );
+      expect(addrs(changed)).toEqual([buf + 0x40n, buf + 0x80n]);
+      // chained: changed's stored value is now the NEW value
+      expect(changed[0]!.value).toBe(210);
+      expect(changed[1]!.value).toBe(295);
+
+      const unchanged = await proc.nextScan(
+        list,
+        { type: 'unchanged' },
+        {
+          type: 'int32',
+        },
+      );
+      expect(addrs(unchanged)).toEqual([buf]);
+
+      const inc = await proc.nextScan(
+        list,
+        { type: 'increased' },
+        {
+          type: 'int32',
+        },
+      );
+      expect(addrs(inc)).toEqual([buf + 0x40n]);
+      const dec = await proc.nextScan(
+        list,
+        { type: 'decreased' },
+        {
+          type: 'int32',
+        },
+      );
+      expect(addrs(dec)).toEqual([buf + 0x80n]);
+
+      const incBy = await proc.nextScan(
+        list,
+        { type: 'increasedBy', value: 10 },
+        { type: 'int32' },
+      );
+      expect(addrs(incBy)).toEqual([buf + 0x40n]);
+      const decBy = await proc.nextScan(
+        list,
+        { type: 'decreasedBy', value: 5 },
+        { type: 'int32' },
+      );
+      expect(addrs(decBy)).toEqual([buf + 0x80n]);
+
+      const between = await proc.nextScan(
+        list,
+        { type: 'between', lo: 100, hi: 299 },
+        { type: 'int32' },
+      );
+      // current values 100, 210, 295 — all inside [100, 299]
+      expect(addrs(between)).toEqual([buf, buf + 0x40n, buf + 0x80n]);
+
+      const ranged = await proc.nextScan(
+        list,
+        { type: 'range', lo: 200, hi: 250 },
+        { type: 'int32' },
+      );
+      expect(addrs(ranged)).toEqual([buf + 0x40n]);
+    } finally {
+      proc.free(buf);
+    }
+  });
+
+  test('relative modes on a live counter (g_counter ticks up)', async () => {
+    using proc = Process.open(victim.pid);
+    const addr = victim.addr.g_counter;
+    const first = await proc.scanValue(proc.readInt32(addr), {
+      type: 'int32',
+      start: addr,
+      end: addr + 4n,
+    });
+    expect(addrs(first)).toEqual([addr]);
+    await sleep(1100); // victim bumps g_counter ~1/sec
+    const after = proc.readInt32(addr);
+    if (after === first[0]!.value) return; // unlucky timing — skip
+    const inc = await proc.nextScan(
+      first,
+      { type: 'increased' },
+      {
+        type: 'int32',
+      },
+    );
+    expect(addrs(inc)).toEqual([addr]);
+    const unchanged = await proc.nextScan(
+      first,
+      { type: 'unchanged' },
+      {
+        type: 'int32',
+      },
+    );
+    expect(unchanged).toEqual([]);
+  });
+
+  test('relative modes reject bare-address hits (no stored value)', async () => {
+    using proc = Process.open(victim.pid);
+    await expect(
+      proc.nextScan([victim.addr.g_i32], { type: 'changed' }),
+    ).rejects.toThrow(TypeError);
   });
 });
 

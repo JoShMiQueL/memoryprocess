@@ -910,31 +910,62 @@ Napi::Value DisasmInstructionsSync(const Napi::CallbackInfo& info) {
   return arr;
 }
 
-// hookSteal(handle, address[, minBytes]) -> { length, bytes:Buffer }
-// QA4-C2: the TS trampoline hook copies stolen instructions VERBATIM into a
-// stub at a different address — any position-relative instruction in the
-// stolen set (rel branches/calls whose immediates are pc-relative, or
-// RIP-relative memory operands) silently jumps to / references the WRONG
-// address when executed from the stub. MinHook solves this by relocating;
-// until we implement relocation we REFUSE to steal such instructions.
-// This also cleanly rejects double-hooking `src` — our own E9 patch decodes
-// as a position-relative instruction.
+// hookSteal(handle, address[, minBytes][, stubAddr]) -> { length, bytes:Buffer }
+//
+// MinHook-style relocation: steals whole instructions until >= minBytes are
+// covered, then rewrites position-relative operands so the stolen bytes are
+// correct when executed from `stubAddr` (which must be within rel32 range of
+// `address` — the caller's #allocNear guarantees this):
+//  - rel32 branch/call (E8/E9/0F8x, xbegin): rel32 rewritten in place, OR
+//    copied verbatim when the target is INSIDE the stolen window (MinHook's
+//    "internal jump" rule — distances are preserved by the copy).
+//  - RIP-relative ModRM (mod=00 rm=101): disp32 rewritten in place so it
+//    still reaches the original absolute target.
+//  - rel8/rel16 branches incl. LOOP/JECXZ (E0-E3): verbatim if internal —
+//    the operand is position-independent within the window — otherwise
+//    REFUSED (rel8 can't be widened to a same-length rewrite; MinHook
+//    refuses LOOP/JECXZ-external too).
+// Without `stubAddr` every position-relative instruction is refused
+// (HOOK_RELOCATE) — the old verify-only behavior for raw inspection calls.
 // Throws HOOK_STEAL when <minBytes of decodable instructions exist, or
 // HOOK_RELOCATE naming the offending opcode/offset. Returns the stolen bytes
 // so the caller doesn't need a second remote read.
 Napi::Value HookStealSync(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   if (info.Length() < 2 || !info[0].IsNumber() || !info[1].IsNumber()) {
-    Napi::TypeError::New(env, "expected (handle, address[, minBytes])")
+    Napi::TypeError::New(env, "expected (handle, address[, minBytes][, stubAddr])")
         .ThrowAsJavaScriptException();
     return env.Null();
   }
   HANDLE h = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(info[0].As<Napi::Number>().DoubleValue()));
   auto addr = static_cast<std::uintptr_t>(info[1].As<Napi::Number>().DoubleValue());
   std::size_t minBytes = 5;
-  if (info.Length() > 2 && info[2].IsNumber()) {
-    double m = info[2].As<Napi::Number>().DoubleValue();
-    if (std::isfinite(m) && m >= 1 && m <= 64) minBytes = static_cast<std::size_t>(m);
+  std::uintptr_t stub = 0;
+  // Accepted arg shapes:
+  //   hookSteal(h, a, 5)               — minBytes number
+  //   hookSteal(h, a, 5, stub)         — minBytes + stubAddr (number|bigint)
+  //   hookSteal(h, a, {minBytes, stubAddr}) — options object
+  if (info.Length() > 2) {
+    if (info[2].IsNumber()) {
+      double m = info[2].As<Napi::Number>().DoubleValue();
+      if (std::isfinite(m) && m >= 1 && m <= 64) minBytes = static_cast<std::size_t>(m);
+      if (info.Length() > 3) {
+        std::uint64_t s = 0;
+        if (JsToU64(info[3], s)) stub = static_cast<std::uintptr_t>(s);
+      }
+    } else if (info[2].IsObject() && !info[2].IsNull()) {
+      auto opts = info[2].As<Napi::Object>();
+      auto mb = opts.Get("minBytes");
+      if (mb.IsNumber()) {
+        double m = mb.As<Napi::Number>().DoubleValue();
+        if (std::isfinite(m) && m >= 1 && m <= 64) minBytes = static_cast<std::size_t>(m);
+      }
+      auto sa = opts.Get("stubAddr");
+      if (!sa.IsUndefined()) {
+        std::uint64_t s = 0;
+        if (JsToU64(sa, s)) stub = static_cast<std::uintptr_t>(s);
+      }
+    }
   }
   // An instruction beginning <15 bytes before minBytes can overshoot past it —
   // read minBytes+15 so no valid tail instruction truncates.
@@ -955,6 +986,19 @@ Napi::Value HookStealSync(const Napi::CallbackInfo& info) {
     err.ThrowAsJavaScriptException();
   };
 
+  // Pass 1: decode — collect each instruction's decode state for relocation.
+  struct StolenInsn {
+    std::size_t off;         // offset within buf
+    unsigned len;
+    std::uint32_t flags;
+    std::uint8_t opcode, opcode2;
+    bool ripRel;             // RIP-relative ModRM operand (mod=00 rm=101)
+    std::size_t immOff;      // offset of immediate field (valid if immSize>0)
+    unsigned immSize;        // immediate field size in bytes
+    std::size_t dispOff;     // offset of displacement field (valid if dispSize>0)
+    unsigned dispSize;       // displacement field size in bytes
+  };
+  std::vector<StolenInsn> insns;
   std::size_t off = 0;
   while (off < minBytes && off < buf.size()) {
     std::uint8_t scratch[16] = {};
@@ -976,20 +1020,26 @@ Napi::Value HookStealSync(const Napi::CallbackInfo& info) {
       throwAt("HOOK_STEAL", msg);
       return env.Null();
     }
-    const bool ripRel = (hs.flags & F_MODRM) && hs.modrm_mod == 0 &&
-                        hs.modrm_rm == 5;
-    if ((hs.flags & F_RELATIVE) || ripRel) {
-      char msg[160];
-      const char* which = (hs.flags & F_RELATIVE) ? "relative branch/call" : "RIP-relative operand";
-      std::snprintf(msg, sizeof(msg),
-                    "hookSteal: stolen instruction at +%zu (opcode %02X%s) is %s — copying it to a "
-                    "trampoline would produce a wild jump/read; hook at a different offset or an "
-                    "instruction-aligned site without position-relative operands",
-                    off, hs.opcode2 ? hs.opcode2 : hs.opcode,
-                    hs.opcode2 ? " (0F map)" : "", which);
-      throwAt("HOOK_RELOCATE", msg);
-      return env.Null();
-    }
+    StolenInsn si{};
+    si.off = off;
+    si.len = len;
+    si.flags = hs.flags;
+    si.opcode = hs.opcode;
+    si.opcode2 = hs.opcode2;
+    si.ripRel = (hs.flags & F_MODRM) && hs.modrm_mod == 0 && hs.modrm_rm == 5;
+    // Field sizes: the immediate/disp land at the tail of the instruction.
+    // imm is the LAST field; disp precedes it — MinHook's offset math:
+    //   disp field = len - immSize - dispSize  (same as len-((flags&0x3C)>>2)-4)
+    si.immSize = (hs.flags & F_IMM64) ? 8 :
+                 (hs.flags & F_IMM32) ? 4 :
+                 (hs.flags & F_IMM16) ? 2 :
+                 (hs.flags & F_IMM8)  ? 1 : 0;
+    si.dispSize = (hs.flags & F_DISP32) ? 4 :
+                  (hs.flags & F_DISP16) ? 2 :
+                  (hs.flags & F_DISP8)  ? 1 : 0;
+    si.immOff = si.immSize ? off + len - si.immSize : 0;
+    si.dispOff = si.dispSize ? off + len - si.immSize - si.dispSize : 0;
+    insns.push_back(si);
     off += len;
   }
   if (off < minBytes) {
@@ -1000,9 +1050,93 @@ Napi::Value HookStealSync(const Napi::CallbackInfo& info) {
     throwAt("HOOK_STEAL", msg);
     return env.Null();
   }
+  const std::size_t stolenLen = off;
+
+  // Pass 2: relocate — rewrite position-relative operands in the copied
+  // bytes. `bytes` becomes the relocated copy (what the caller writes to the
+  // stub); `original` keeps the pristine bytes for unhook.
+  std::vector<std::uint8_t> original(buf.begin(), buf.begin() + stolenLen);
+  for (const StolenInsn& si : insns) {
+    if (!(si.flags & F_RELATIVE) && !si.ripRel) continue;
+
+    const char* which = (si.flags & F_RELATIVE) ? "relative branch/call"
+                                                : "RIP-relative operand";
+    auto refuse = [&](const char* detail) {
+      char msg[192];
+      std::snprintf(msg, sizeof(msg),
+                    "hookSteal: stolen instruction at +%zu (opcode %02X%s) is %s: %s",
+                    si.off, si.opcode2 ? si.opcode2 : si.opcode,
+                    si.opcode2 ? " (0F map)" : "", which, detail);
+      throwAt("HOOK_RELOCATE", msg);
+      return env.Null();
+    };
+
+    if (stub == 0) {
+      return refuse("pass stubAddr to enable relocation (copying it verbatim "
+                    "would produce a wild jump/read)");
+    }
+
+    // Immediate-carried relative branches/calls (E8/E9/EB, 70-7F, 0F8x, E0-E3,
+    // xbegin C7 F8): the rel field IS the immediate.
+    if (si.flags & F_RELATIVE) {
+      if (si.immSize == 0) continue;
+      // Old absolute branch target.
+      std::int64_t oldRel = 0;
+      std::memcpy(&oldRel, buf.data() + si.immOff, si.immSize);
+      switch (si.immSize) {  // sign-extend
+        case 1: oldRel = static_cast<std::int8_t>(oldRel); break;
+        case 2: oldRel = static_cast<std::int16_t>(oldRel); break;
+        case 4: oldRel = static_cast<std::int32_t>(oldRel); break;
+      }
+      const std::uintptr_t oldTarget =
+          static_cast<std::uintptr_t>(addr + si.off + si.len + oldRel);
+      // Internal jump: target lands inside the stolen window. The copy
+      // preserves the operand→target distance — leave the bytes verbatim.
+      if (oldTarget >= addr && oldTarget < addr + stolenLen) continue;
+      if (si.immSize != 4) {
+        return refuse("rel8/rel16 external target cannot be widened in place "
+                      "(MinHook refuses LOOP/JECXZ-external too) — hook a "
+                      "different instruction-aligned site");
+      }
+      const std::int64_t newRel =
+          static_cast<std::int64_t>(oldTarget) -
+          (static_cast<std::int64_t>(stub) + si.off + si.len);
+      if (newRel < INT32_MIN || newRel > INT32_MAX) {
+        return refuse("rel32 rewrite lands out of ±2GB range from the stub — "
+                      "allocate the stub nearer to the branch target");
+      }
+      const std::int32_t r32 = static_cast<std::int32_t>(newRel);
+      std::memcpy(buf.data() + si.immOff, &r32, 4);
+      continue;
+    }
+
+    // RIP-relative ModRM memory operand: the disp32 field is the position-
+    // dependent part — rewrite it to reach the same absolute address.
+    if (si.ripRel) {
+      if (si.dispSize != 4) continue;  // mod=00 rm=101 always disp32
+      std::int32_t d32 = 0;
+      std::memcpy(&d32, buf.data() + si.dispOff, 4);
+      const std::uintptr_t oldTarget =
+          static_cast<std::uintptr_t>(addr + si.off + si.len + d32);
+      if (oldTarget >= addr && oldTarget < addr + stolenLen) continue; // internal
+      const std::int64_t newDisp =
+          static_cast<std::int64_t>(oldTarget) -
+          (static_cast<std::int64_t>(stub) + si.off + si.len);
+      if (newDisp < INT32_MIN || newDisp > INT32_MAX) {
+        return refuse("disp32 rewrite lands out of ±2GB range from the stub — "
+                      "allocate the stub nearer to the operand target");
+      }
+      const std::int32_t n32 = static_cast<std::int32_t>(newDisp);
+      std::memcpy(buf.data() + si.dispOff, &n32, 4);
+      continue;
+    }
+  }
+
   auto o = Napi::Object::New(env);
-  o.Set("length", Napi::Number::New(env, static_cast<double>(off)));
-  o.Set("bytes", Napi::Buffer<std::uint8_t>::Copy(env, buf.data(), off));
+  o.Set("length", Napi::Number::New(env, static_cast<double>(stolenLen)));
+  o.Set("bytes", Napi::Buffer<std::uint8_t>::Copy(env, buf.data(), stolenLen));
+  o.Set("original",
+        Napi::Buffer<std::uint8_t>::Copy(env, original.data(), stolenLen));
   return o;
 }
 

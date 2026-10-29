@@ -471,14 +471,14 @@ describe('hook abuse (dedicated victim)', () => {
     }
   });
 
-  test('hook with stolen rel32 (C2): call-rel32 fn → REFUSED (HOOK_RELOCATE)', async () => {
+  test('hook with stolen rel32 (C2): call-rel32 fn → RELOCATED, hook succeeds', async () => {
     const v2 = await spawnVictim();
     try {
       const p2 = Process.open(v2.pid);
       const base = await injectAndWait(p2);
-      // src = E8 <rel32 to a ret INSIDE the same page> ; C3 → an E8 is an E8
-      // regardless of target — the point is that hookSteal must refuse the
-      // position-relative instruction, not where it points.
+      // src = E8 <rel32 to a ret INSIDE the same page>; C3 — since v2 hookSteal
+      // RELOCATES rel32, this now succeeds and the relocated call in the stub
+      // still reaches the original target.
       const src = p2.alloc(0x100, Protection.PAGE_EXECUTE_READWRITE);
       const code = Buffer.alloc(0x80, 0xc3);
       code[0] = 0xe8;
@@ -486,12 +486,14 @@ describe('hook abuse (dedicated victim)', () => {
       p2.writeBuffer(src, code);
       const dst = src + 0x40n;
       const h = probe(() => p2.hook(src, dst));
-      expect(h.threw).toBe(true);
+      expect(h.threw).toBe(false);
       rec(
         'hook(stolen E8 rel32)',
-        `threw ${h.err!.name} — refused (C2 FIXED)`,
+        `succeeded — rel32 relocated to stub (C2 UPGRADED)`,
         'ok',
       );
+      // Clean up the live hook we just installed.
+      p2.unhook(h.val!);
       // victim still alive — no wild jump happened
       expect(typeof p2.readInt32(v2.addr.g_i32)).toBe('number');
       p2.close();

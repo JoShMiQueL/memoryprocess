@@ -117,16 +117,22 @@ interface Native {
     count: number,
   ): { offset: number; length: number; relative: boolean }[];
   /**
-   * Walk instructions at `address` until `minBytes` are covered, refusing
-   * position-relative instructions (rel branches/calls, RIP-relative
-   * operands) that can't be safely copied to a trampoline stub.
-   * Throws `HOOK_STEAL`/`HOOK_RELOCATE` — returns the stolen bytes.
+   * Walk instructions at `address` until `minBytes` are covered, then
+   * RELOCATE position-relative operands (rel32 branch/call immediates,
+   * RIP-relative disp32) so the stolen bytes are correct when executed from
+   * `stubAddr` (must be within rel32 range of `address`). External rel8/16
+   * branches (incl. LOOP/JECXZ) can't be widened — refused `HOOK_RELOCATE`,
+   * like MinHook; rel8/16 internal (target inside the stolen window) and
+   * all non-relative instructions copy verbatim. Without `stubAddr` any
+   * position-relative instruction is refused (inspection mode).
+   * Throws `HOOK_STEAL`/`HOOK_RELOCATE` — returns the relocated bytes.
    */
   hookSteal(
     handle: number,
     address: number,
-    minBytes?: number,
-  ): { length: number; bytes: Buffer };
+    minBytesOrOpts?: number | { minBytes?: number; stubAddr?: number | bigint },
+    stubAddr?: number | bigint,
+  ): { length: number; bytes: Buffer; original: Buffer };
   /**
    * Per-region VirtualProtectEx→write→restore across the whole write span —
    * records each region's real old protection before writing, restores each

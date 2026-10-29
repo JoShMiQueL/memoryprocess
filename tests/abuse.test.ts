@@ -119,9 +119,9 @@ describe('M5 — nextScan page-straddle', () => {
       start: base,
       end: base + 0x3000n,
     });
-    expect(hits).toContain(straddle);
+    expect(hits.map((h) => h.addr)).toContain(straddle);
     const kept = await proc.nextScan(hits, 0x112233445566n, { type: 'int64' });
-    expect(kept).toContain(straddle);
+    expect(kept.map((h) => h.addr)).toContain(straddle);
     proc.free(base);
   });
 });
