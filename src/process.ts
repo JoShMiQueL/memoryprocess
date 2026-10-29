@@ -41,6 +41,8 @@ export const ProcessAccess = {
   READ_WRITE_QUERY: 0x0010 | 0x0020 | 0x0008 | 0x0400,
 } as const
 
+export interface HookHandle { src: bigint; dst: bigint; stub: bigint; stolen: Buffer }
+
 export interface ScanOptions {
   /** start address (default 0) */
   start?: number | bigint
@@ -261,6 +263,91 @@ export class Process implements Disposable {
     buf[0] = 0xe9
     buf.writeInt32LE(Number(BigInt.asIntN(32, rel)), 1)
     return this.writeProtected(src, buf)
+  }
+  /** Write an E8 relative call from `src` to `dst` (5 bytes). */
+  patchCall(src: number | bigint, dst: number | bigint): boolean {
+    const rel = BigInt(dst) - (BigInt(src) + 5n)
+    const buf = Buffer.alloc(5)
+    buf[0] = 0xe8
+    buf.writeInt32LE(Number(BigInt.asIntN(32, rel)), 1)
+    return this.writeProtected(src, buf)
+  }
+
+  // ---- disasm / hooks / shellcode ----
+
+  /**
+   * Instruction-length decode only — no mnemonics (not a full disassembler).
+   * Uses the embedded HDE64 decoder on up to 4096 bytes read at `addr`.
+   */
+  disassemble(addr: number | bigint, count: number): { address: bigint; size: number; bytes: Buffer }[] {
+    this.assertOpen()
+    const base = BigInt(addr)
+    const raw = native.readBuffer(this.#handle, Number(addr), Math.min(count * 16, 4096))
+    const insns = native.disasmInstructions(this.#handle, Number(addr), count)
+    return insns.map(i => ({
+      address: base + BigInt(i.offset),
+      size: i.length,
+      bytes: Buffer.from(raw.subarray(i.offset, i.offset + i.length)),
+    }))
+  }
+
+  /**
+   * Classic trampoline hook: steals whole instructions at `src` until >=5
+   * bytes are covered, copies them to a remote stub ending in a jmp back to
+   * `src+stolenLen`, then overwrites `src` with an E9 jmp to `dst` (padded
+   * with 0xCC to stolenLen). Returns a {@link HookHandle} for {@link unhook}.
+   */
+  hook(src: number | bigint, dst: number | bigint): HookHandle {
+    this.assertOpen()
+    const s = BigInt(src), d = BigInt(dst)
+    const insns = this.disassemble(s, 16)
+    let stolenLen = 0
+    for (const i of insns) {
+      stolenLen += i.size
+      if (stolenLen >= 5) break
+    }
+    if (stolenLen < 5) throw new WriteError(s)
+    const stolen = this.readBuffer(s, stolenLen)
+
+    const stub = this.alloc(stolenLen + 5, Protection.PAGE_EXECUTE_READWRITE)
+    const back = Buffer.alloc(stolenLen + 5)
+    stolen.copy(back, 0)
+    back[stolenLen] = 0xe9
+    const relBack = (s + BigInt(stolenLen)) - (stub + BigInt(stolenLen) + 5n)
+    back.writeInt32LE(Number(BigInt.asIntN(32, relBack)), stolenLen + 1)
+    this.writeBuffer(stub, back)
+
+    const patch = Buffer.alloc(stolenLen, 0xcc)
+    patch[0] = 0xe9
+    const relDst = d - (s + 5n)
+    patch.writeInt32LE(Number(BigInt.asIntN(32, relDst)), 1)
+    this.writeProtected(s, patch)
+
+    return { src: s, dst: d, stub, stolen }
+  }
+
+  /** Restore stolen bytes at `h.src` and free the stub. Returns combined ok. */
+  unhook(h: HookHandle): boolean {
+    this.assertOpen()
+    const ok = this.writeProtected(h.src, h.stolen)
+    const freed = this.free(h.stub)
+    return ok && freed
+  }
+
+  /**
+   * Copy `bytes` into fresh RWX remote memory, run it on a remote thread
+   * (lpParameter=`param`), wait up to `timeoutMs`, then free the memory.
+   * Returns the thread exit code or null on failure/timeout.
+   */
+  execShellcode(bytes: Buffer | Uint8Array, param = 0, timeoutMs = 10000): number | null {
+    this.assertOpen()
+    const addr = this.alloc(bytes.length, Protection.PAGE_EXECUTE_READWRITE)
+    try {
+      this.writeBuffer(addr, bytes)
+      return this.callRemote(addr, param, timeoutMs)
+    } finally {
+      this.free(addr)
+    }
   }
 
   // ---- threads / info ----

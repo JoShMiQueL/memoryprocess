@@ -36,4 +36,7 @@ Napi::Value GetThreadContextSync(const Napi::CallbackInfo& info); // GetThreadCo
 Napi::Value SetThreadContextSync(const Napi::CallbackInfo& info); // patch fields + SetThreadContext
 Napi::Value CallRemoteSync(const Napi::CallbackInfo& info);       // CreateRemoteThread + wait
 
+// v2 disasm (HDE64 length decode)
+Napi::Value DisasmInstructionsSync(const Napi::CallbackInfo& info); // hde64_disasm walk
+
 } // namespace mp

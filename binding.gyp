@@ -10,7 +10,8 @@
         "native/process.cc",
         "native/memory.cc",
         "native/module.cc",
-        "native/pattern.cc"
+        "native/pattern.cc",
+        "native/hde/hde64.c"
       ],
       "defines": [
         "NAPI_DISABLE_CPP_EXCEPTIONS",

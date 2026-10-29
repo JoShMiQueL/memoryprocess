@@ -2,6 +2,9 @@
 #include "memory.h"
 #include <system_error>
 #include <tlhelp32.h>
+extern "C" {
+#include "hde/hde64.h"
+}
 
 namespace mp {
 
@@ -565,6 +568,53 @@ Napi::Value CallRemoteSync(const Napi::CallbackInfo& info) {
   CloseHandle(h);
   if (!ok) return env.Null();
   return Napi::Number::New(env, static_cast<double>(code));
+}
+
+// ---------- v2 disasm (HDE64 length decode) ----------
+
+// disasmInstructions(handle, address, count) -> [{offset, length}]
+// Reads up to count*16 bytes (capped 4096) once via ReadBytes, then walks
+// the buffer with hde64_disasm returning per-instruction offsets+lengths.
+Napi::Value DisasmInstructionsSync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 3 || !info[0].IsNumber() || !info[1].IsNumber() || !info[2].IsNumber()) {
+    Napi::TypeError::New(env, "expected (handle, address, count)").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+  HANDLE h = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(info[0].As<Napi::Number>().DoubleValue()));
+  auto addr = static_cast<std::uintptr_t>(info[1].As<Napi::Number>().DoubleValue());
+  auto count = static_cast<std::size_t>(info[2].As<Napi::Number>().DoubleValue());
+  if (count == 0) return Napi::Array::New(env, 0);
+
+  std::size_t readSize = count * 16;   // max x64 instruction length is 15
+  if (readSize > 4096) readSize = 4096;
+
+  std::vector<std::uint8_t> buf;
+  try {
+    buf = ReadBytes(h, addr, readSize);
+  } catch (const std::system_error& e) {
+    auto err = Napi::Error::New(env, e.what());
+    err.Set("code", "READ_FAILED");
+    err.Set("win32code", Napi::Number::New(env, static_cast<double>(e.code().value())));
+    err.ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  auto arr = Napi::Array::New(env);
+  std::size_t off = 0, n = 0;
+  while (off < buf.size() && n < count) {
+    hde64s hs{};
+    unsigned int len = hde64_disasm(buf.data() + off, &hs);
+    if (len == 0 || (hs.flags & F_ERROR)) break;
+    if (off + len > buf.size()) break;   // truncated tail instruction
+    auto o = Napi::Object::New(env);
+    o.Set("offset", Napi::Number::New(env, static_cast<double>(off)));
+    o.Set("length", Napi::Number::New(env, static_cast<double>(len)));
+    arr.Set(n, o);
+    off += len;
+    n++;
+  }
+  return arr;
 }
 
 } // namespace mp

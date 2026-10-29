@@ -27,6 +27,7 @@ static Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("getThreadContext", Napi::Function::New(env, mp::GetThreadContextSync));
   exports.Set("setThreadContext", Napi::Function::New(env, mp::SetThreadContextSync));
   exports.Set("callRemote", Napi::Function::New(env, mp::CallRemoteSync));
+  exports.Set("disasmInstructions", Napi::Function::New(env, mp::DisasmInstructionsSync));
   return exports;
 }
 

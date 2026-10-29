@@ -13,7 +13,7 @@ Read and write **Windows process memory** from Node.js, Bun, or Deno. N-API nati
 - **Process** — open by name or PID, least-privilege access, `using`/dispose, process listing
 - **Memory R/W** — typed scalar reads/writes (i8–i64, f32/f64, pointers), buffers, strings (UTF-8/UTF-16), fault-tolerant `readSafe`, arrays, flat structs
 - **Pattern scan** — async `scan`/`scanFirst`/`scanUnique` with wildcards, module- or range-scoped, off the event loop (`Napi::AsyncWorker`)
-- **Allocation & patching** — `alloc`/`free`/`protect`, `writeProtected` (+icache flush), `nop`, `patchJump`, `findCodeCave`
+- **Allocation & patching** - `alloc`/`free`/`protect`, `writeProtected` (+icache flush), `nop`, `patchJump`/`patchCall`, `hook`/`unhook` (E9 detour + trampoline), `execShellcode`, `disassemble` (x64 instruction lengths), `findCodeCave`
 - **Modules** — enumerate, resolve by name or address, `resolveExport`, `dumpModule` to disk
 - **Threads** — list/suspend/resume, `mainThread`, `getThreadContext`/`setThreadContext`, hardware breakpoints (DR0–DR3), `callRemote`
 - **DLL injection** — `injectDll`/`ejectDll` round-trip via remote `LoadLibraryA`/`FreeLibrary`
@@ -81,6 +81,18 @@ for (const m of proc.modules()) console.log(m.path, m.base.toString(16))
 | `writeProtected` | `(addr, buf) → boolean` | Protect→write→restore→flush icache |
 | `nop` | `(addr, len) → boolean` | Fill with 0x90 |
 | `patchJump` | `(src, dst) → boolean` | E9 relative jump (5 bytes) |
+| `patchCall` | `(src, dst) → boolean` | E8 relative call (5 bytes) |
+
+### Code patching & hooks
+
+| Method | Signature | Description |
+|---|---|---|
+| `disassemble` | `(addr, count) → Insn[]` | x64 instruction-length decode: `{ address, size, bytes }` (no mnemonics) |
+| `hook` | `(src, dst) → HookHandle` | Steal ≥5 whole bytes at `src`, build trampoline stub, write E9 detour |
+| `unhook` | `(handle) → boolean` | Restore stolen bytes, free stub |
+| `execShellcode` | `(bytes, param?, timeoutMs?) → number \| null` | Alloc RWX → write → `callRemote` → free; returns exit code |
+
+`HookHandle`: `{ src, dst, stub, stolen }` — call `stub` via `callRemote` to invoke the original function.
 
 ### Memory management & query
 
@@ -146,7 +158,7 @@ All failures throw subclasses of `MemoryProcessError` with `.code` and `.win32co
 
 ## Examples
 
-See [`examples/`](examples/): `basic-read.ts`, `pointer-chain.ts`, `inject-dll.ts`, `code-cave.ts`.
+See [`examples/`](examples/): `basic-read.ts`, `pointer-chain.ts`, `inject-dll.ts`, `code-cave.ts`, `hook-function.ts`.
 
 ## Platform support
 

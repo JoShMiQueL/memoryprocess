@@ -38,6 +38,7 @@ interface Native {
   } | null
   setThreadContext(tid: number, ctx: Partial<Record<'rip' | 'rsp' | 'rbp' | 'dr0' | 'dr1' | 'dr2' | 'dr3' | 'dr7' | 'eflags', number | bigint>>): boolean
   callRemote(pid: number, fnAddress: number | bigint, param: number | bigint, timeoutMs?: number): number | null
+  disasmInstructions(handle: number, address: number, count: number): { offset: number; length: number }[]
 }
 
 // Resolution order: dist/memoryprocess.node (built/packaged) -> prebuilds via
