@@ -8,6 +8,17 @@ import {
   ScanError,
   InjectError,
 } from './errors.js';
+import {
+  Address,
+  Entity,
+  EntityList,
+  Offsets,
+  readMany as readManyImpl,
+  findPointersTo as findPointersToImpl,
+  type EntitySchema,
+  type EntityListOptions,
+  type OffsetsJson,
+} from './hacks.js';
 
 export interface ProcessInfo {
   pid: number;
@@ -1583,6 +1594,78 @@ export class Process implements Disposable {
       native.closeHandle(this.#handle);
       this.#handle = 0;
     }
+  }
+
+  // ---- high-level cheat-dev helpers ----
+
+  /**
+   * Fluent pointer-chain address. `base` may be a bigint, a numeric address,
+   * or a Cheat-Engine `"module+rva"` string (`'client.dll+0xDEB99C'`).
+   * `chain` offsets are walked like {@link resolvePointer}.
+   * `proc.addr('game.exe+0x1F2A3C', 0x10, 0x28, 0x8).readInt32()`
+   */
+  addr(base: number | bigint | string, ...chain: number[]): Address {
+    return new Address(this, base, chain);
+  }
+
+  /**
+   * Typed view over a region. `snapshot()` does ONE `readBuffer` covering the
+   * whole schema and decodes every field locally — cheap per-frame read for
+   * ESP/aimbot loops. `read(name)`/`write(name, v)` hit live memory.
+   */
+  entity(addr: number | bigint, schema: EntitySchema): Entity {
+    return new Entity(this, BigInt(addr), schema);
+  }
+
+  /**
+   * Iterate an entity list — array-stride (`stride`) or linked-list (`next`).
+   * Yields addresses, or {@link Entity} views when `schema` is given.
+   */
+  entityList(opts: EntityListOptions): EntityList {
+    return new EntityList(this, opts);
+  }
+
+  /**
+   * Batch-read many typed values. Groups requests by 4KB page and does ONE
+   * `readSafe` per page — 10-50× fewer N-API crossings than per-address reads.
+   * Returns `null` for any address that can't be decoded.
+   */
+  readMany(
+    reqs: {
+      addr: number | bigint;
+      type:
+        | 'int32'
+        | 'uint32'
+        | 'int64'
+        | 'uint64'
+        | 'float'
+        | 'double'
+        | 'pointer';
+    }[],
+  ): (number | bigint | null)[] {
+    return readManyImpl(this, reqs);
+  }
+
+  /**
+   * Shallow "who points at this" scan — find every aligned location storing
+   * a pointer to `target` (a lightweight CE pointer-scan). Async.
+   */
+  findPointersTo(
+    target: number | bigint,
+    opts: {
+      module?: string;
+      start?: number | bigint;
+      end?: number | bigint;
+      onlyWritable?: boolean;
+      alignment?: number;
+    } = {},
+  ): Promise<bigint[]> {
+    return findPointersToImpl(this, target, opts);
+  }
+
+  /** Parse a sig/offset database (cs2-dumper or hazedumper) bound to this proc. */
+  offsets(json: string | OffsetsJson): Offsets {
+    return Offsets.of(this, json);
   }
 
   [Symbol.dispose](): void {

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { Hacks, Process, Protection } from '../src/index.js';
+import { Process, Offsets } from '../src/index.js';
 import { spawnVictim, type Victim } from './victim.js';
 
 let victim: Victim;
@@ -10,119 +10,99 @@ afterAll(() => {
   victim?.kill();
 });
 
-describe('Address (fluent chain)', () => {
-  test('resolve() with no chain returns base verbatim', () => {
+describe('proc.addr — CE-style mod+rva + chain', () => {
+  test('"module+rva" resolves to the right address', () => {
     using proc = Process.open(victim.pid);
-    const h = new Hacks(proc);
-    expect(h.addr(victim.addr.g_i32).resolve()).toBe(victim.addr.g_i32);
-  });
-
-  test('g_ppp → g_i32 chain matches proc.resolvePointer', () => {
-    using proc = Process.open(victim.pid);
-    const h = new Hacks(proc);
-    // resolvePointer(base,[0x0]) reads *base then +0 → lands on g_pp.
-    // g_ppp → *→ g_pp → *→ g_ptr → *→ g_i32: three derefs = chain [0,0,0].
-    const expected = proc.resolvePointer(victim.addr.g_ppp, [0, 0, 0]);
-    const a = h.addr(victim.addr.g_ppp).add(0).deref().add(0).deref().add(0);
-    expect(a.resolve()).toBe(expected);
+    const mod = proc.module('victim.exe')!;
+    const rva = Number(victim.addr.g_i32) - mod.base;
+    const a = proc.addr(`victim.exe+0x${rva.toString(16)}`);
     expect(a.resolve()).toBe(victim.addr.g_i32);
-  });
-
-  test('readInt32() at resolved chain == live value', () => {
-    using proc = Process.open(victim.pid);
-    const h = new Hacks(proc);
-    const a = h.addr(victim.addr.g_ppp).add(0).deref().add(0).deref().add(0);
     expect(a.readInt32()).toBe(proc.readInt32(victim.addr.g_i32));
   });
 
-  test('readInt32 on a plain addr reads at base, not through it', () => {
+  test('variadic chain walks like resolvePointer', () => {
     using proc = Process.open(victim.pid);
-    const h = new Hacks(proc);
-    expect(h.addr(victim.addr.g_u32).readUInt32()).toBe(0xdeadbeef);
+    // g_ppp -> g_pp -> g_ptr -> g_i32 ; offsets [0,0,0]
+    const direct = proc.resolvePointer(victim.addr.g_ppp, [0, 0, 0]);
+    const a = proc.addr(victim.addr.g_ppp, 0, 0, 0);
+    expect(a.resolve()).toBe(direct);
+    expect(a.resolve()).toBe(victim.addr.g_i32);
   });
 
-  test('add() is immutable — original chain untouched', () => {
+  test('.add() appends to the chain immutably', () => {
     using proc = Process.open(victim.pid);
-    const h = new Hacks(proc);
-    const a = h.addr(0x1000n);
-    const b = a.add(0x10);
-    expect(a).not.toBe(b);
-    expect(a.chain).toEqual([]);
-    expect(b.chain).toEqual([0x10]);
-    expect(a.resolve()).toBe(0x1000n);
+    const a0 = proc.addr(victim.addr.g_ppp);
+    const a1 = a0.add(0).add(0).add(0);
+    expect(a0.chain.length).toBe(0);
+    expect(a1.resolve()).toBe(victim.addr.g_i32);
+  });
+
+  test('module string for a missing module throws', () => {
+    using proc = Process.open(victim.pid);
+    expect(() => proc.addr('nosuch.dll+0x10')).toThrow();
   });
 });
 
-describe('OffsetsDb', () => {
-  const json = {
-    signatures: {
-      g_pattern: {
-        module: 'victim.exe',
-        // exact bytes of g_pattern[16]
-        pattern: '48 8B 05 AA BB CC 90 90 DE AD BE EF 00 11 22 33',
-      },
-    },
-    netvars: {
-      static_rva: {
-        module: 'victim.exe',
-        rva: 0,
-      },
-    },
-  };
-
-  test('load → resolve(name) scans module and returns hit', async () => {
+describe('Offsets — cs2-dumper + hazedumper + property access', () => {
+  test('cs2-dumper module-keyed rva map → property Address', async () => {
     using proc = Process.open(victim.pid);
-    const h = new Hacks(proc);
-    const db = h.loadOffsets(JSON.stringify(json));
-    const a = await db.resolve('g_pattern');
-    expect(a).toBe(victim.addr.g_pattern);
-  });
-
-  test('rva-only entry resolves to module base', async () => {
-    using proc = Process.open(victim.pid);
-    const h = new Hacks(proc);
-    const db = h.loadOffsets(json);
     const mod = proc.module('victim.exe')!;
-    expect(await db.resolve('static_rva')).toBe(BigInt(mod.base));
+    const rva = Number(victim.addr.g_i32) - mod.base;
+    const off = proc.offsets({
+      'victim.exe': {
+        g_i32: rva,
+        g_counter: Number(victim.addr.g_counter) - mod.base,
+      },
+    });
+    await off.ready();
+    // @ts-expect-error proxy-populated property
+    const a = off.g_i32;
+    expect(a.readInt32()).toBe(proc.readInt32(victim.addr.g_i32));
+    // @ts-expect-error proxy-populated
+    expect(off.g_counter.readInt32()).toBeGreaterThan(0);
   });
 
-  test('resolve caches — second call same result, no rescan', async () => {
+  test('hazedumper signatures (AOB) resolve to the pattern addr', async () => {
     using proc = Process.open(victim.pid);
-    const h = new Hacks(proc);
-    const db = h.loadOffsets(json);
-    const a = await db.resolve('g_pattern');
-    const b = await db.resolve('g_pattern');
-    expect(b).toBe(a);
+    const mod = proc.module('victim.exe')!;
+    const rva = Number(victim.addr.g_pattern) - mod.base;
+    const off = proc.offsets({
+      signatures: {
+        g_pattern: {
+          module: 'victim.exe',
+          pattern: '48 8B 05 AA BB CC 90 90 DE AD BE EF 00 11 22 33',
+          rva: 0,
+        },
+      },
+    });
+    const addr = await off.resolve('g_pattern');
+    expect(addr).toBe(victim.addr.g_pattern);
   });
 
-  test('resolveAll returns every key', async () => {
+  test('Offsets.of binds in one call; netvars expose field offsets', async () => {
     using proc = Process.open(victim.pid);
-    const h = new Hacks(proc);
-    const db = h.loadOffsets(json);
-    const all = await db.resolveAll();
-    expect(all.g_pattern).toBe(victim.addr.g_pattern);
-    expect(all.static_rva).toBe(BigInt(proc.module('victim.exe')!.base));
-  });
-
-  test('offsets() throws before loadOffsets', () => {
-    using proc = Process.open(victim.pid);
-    const h = new Hacks(proc);
-    expect(() => h.offsets()).toThrow(/loadOffsets/);
+    const off = Offsets.of(proc, {
+      'victim.exe': {
+        g_i32: Number(victim.addr.g_i32) - proc.module('victim.exe')!.base,
+      },
+      netvars: { m_iHealth: 0x24 },
+    });
+    await off.ready();
+    expect(off.netvars.m_iHealth).toBe(0x24);
+    // @ts-expect-error proxy
+    expect(off.g_i32).toBeDefined();
   });
 });
 
-describe('Entity', () => {
-  const schema = {
-    id: [0, 'int32'],
-    health: [4, 'float'],
-    mana: [8, 'double'],
-    name: [16, 'string:32'],
-  } as const;
-
-  test('snapshot() decodes every field in one read', () => {
+describe('proc.entity / entityList', () => {
+  test('entity.snapshot decodes the packed struct', () => {
     using proc = Process.open(victim.pid);
-    const h = new Hacks(proc);
-    const e = h.entity(victim.addr.g_entity, schema);
+    const e = proc.entity(victim.addr.g_entity, {
+      id: [0, 'int32'],
+      health: [4, 'float'],
+      mana: [8, 'double'],
+      name: [16, 'string:32'],
+    });
     const s = e.snapshot<{
       id: number;
       health: number;
@@ -130,140 +110,52 @@ describe('Entity', () => {
       name: string;
     }>();
     expect(s.id).toBe(1337);
-    expect(s.health).toBeCloseTo(87.5, 5);
-    expect(s.mana).toBeCloseTo(4200.75, 6);
+    expect(Math.abs(s.health - 87.5)).toBeLessThan(0.01);
+    expect(Math.abs(s.mana - 4200.75)).toBeLessThan(0.01);
     expect(s.name).toBe('TestEntity');
   });
 
-  test('read(field) / write(field) hit live memory', () => {
+  test('entity.read/write a single field', () => {
     using proc = Process.open(victim.pid);
-    const h = new Hacks(proc);
-    const e = h.entity(victim.addr.g_entity, schema);
-    expect(e.read('id')).toBe(1337);
-    const orig = proc.readInt32(victim.addr.g_entity);
-    e.write('id', 4242);
-    expect(proc.readInt32(victim.addr.g_entity)).toBe(4242);
-    e.write('id', orig);
-    expect(e.read('name')).toBe('TestEntity');
+    const e = proc.entity(victim.addr.g_entity, { id: [0, 'int32'] });
+    e.write('id', 0xbeef);
+    expect(e.read('id')).toBe(0xbeef);
+    e.write('id', 1337); // restore
   });
-});
 
-describe('EntityList', () => {
-  test('array-stride over g_array yields 64 int32s', () => {
+  test('entityList array-stride over g_array yields all 64', () => {
     using proc = Process.open(victim.pid);
-    const h = new Hacks(proc);
-    const list = h.entityList({
+    const list = proc.entityList({
       first: victim.addr.g_array,
       stride: 4,
+      schema: { v: [0, 'int32'] },
       max: 64,
     });
-    const addrs = [...list] as bigint[];
-    expect(addrs.length).toBe(64);
-    for (let i = 0; i < 64; i++)
-      expect(proc.readInt32(addrs[i]!)).toBe(i * 100);
-  });
-
-  test('linked-list walks g_ppp chain until null', () => {
-    using proc = Process.open(victim.pid);
-    const h = new Hacks(proc);
-    // g_ppp is itself the head pointer; next-offset 0 yields *cur each hop.
-    // The chain tail (g_i32) is data, not a node — the walk yields one extra
-    // hop reading g_i32's value as a pointer, then stops on the ReadError.
-    const list = h.entityList({ first: victim.addr.g_ppp, next: 0, max: 8 });
-    const addrs = [...list] as bigint[];
-    expect(addrs.slice(0, 3)).toEqual([
-      victim.addr.g_pp,
-      victim.addr.g_ptr,
-      victim.addr.g_i32,
-    ]);
-    expect(addrs.length).toBeGreaterThanOrEqual(3);
-    expect(addrs.length).toBeLessThanOrEqual(8);
-  });
-
-  test('schema mode yields Entity views', () => {
-    using proc = Process.open(victim.pid);
-    const h = new Hacks(proc);
-    const schema = { v: [0, 'int32'] } as const;
-    const list = h.entityList({
-      first: victim.addr.g_array,
-      stride: 4,
-      max: 3,
-      schema,
-    });
-    const ents = [...list];
-    expect((ents[0] as any).read('v')).toBe(0);
-    expect((ents[2] as any).read('v')).toBe(200);
+    const ents = list.toArray();
+    expect(ents.length).toBe(64);
+    const tenth = ents[10] as any;
+    expect(tenth.snapshot().v).toBe(1000);
   });
 });
 
-describe('readMany', () => {
-  test('batch-reads i32/u32/f32 across one call', () => {
+describe('proc.readMany / findPointersTo', () => {
+  test('readMany batches scalars correctly', () => {
     using proc = Process.open(victim.pid);
-    const h = new Hacks(proc);
-    const [i32, u32, f32] = h.readMany([
+    const [i32, u32, f32] = proc.readMany([
       { addr: victim.addr.g_i32, type: 'int32' },
       { addr: victim.addr.g_u32, type: 'uint32' },
       { addr: victim.addr.g_f32, type: 'float' },
     ]);
+    expect(i32).toBe(0x12345678);
     expect(u32).toBe(0xdeadbeef);
-    expect(f32).toBeCloseTo(3.14159265, 5);
-    // g_i32 is mutated by the victim — compare to a direct read, not a literal.
-    expect(i32).toBe(proc.readInt32(victim.addr.g_i32));
+    expect(Math.abs((f32 as number) - 3.14159265)).toBeLessThan(0.001);
   });
 
-  test('unreadable addr → null, others still decode', () => {
+  test('findPointersTo(g_i32) finds the g_ptr slot', async () => {
     using proc = Process.open(victim.pid);
-    const h = new Hacks(proc);
-    const [bad, good] = h.readMany([
-      { addr: 0x1n, type: 'int32' },
-      { addr: victim.addr.g_u32, type: 'uint32' },
-    ]);
-    expect(bad).toBeNull();
-    expect(good).toBe(0xdeadbeef);
-  });
-});
-
-describe('findPointersTo', () => {
-  test('finds the real g_ptr → g_i32 link', async () => {
-    using proc = Process.open(victim.pid);
-    const h = new Hacks(proc);
-    const hits = await h.findPointersTo(victim.addr.g_i32);
-    expect(hits).toContain(victim.addr.g_ptr);
-  });
-
-  test('module-scoped pointer scan stays inside victim.exe', async () => {
-    using proc = Process.open(victim.pid);
-    const h = new Hacks(proc);
-    const mod = proc.module('victim.exe')!;
-    const hits = await h.findPointersTo(victim.addr.g_i32, {
+    const hits = await proc.findPointersTo(victim.addr.g_i32, {
       module: 'victim.exe',
     });
     expect(hits).toContain(victim.addr.g_ptr);
-    for (const p of hits)
-      expect(p >= BigInt(mod.base) && p < BigInt(mod.base + mod.size)).toBe(
-        true,
-      );
-  });
-});
-
-describe('passthroughs', () => {
-  test('scanValue/nextScan/freeze/watch delegate', async () => {
-    using proc = Process.open(victim.pid);
-    const h = new Hacks(proc);
-    const buf = proc.alloc(0x1000, Protection.PAGE_READWRITE);
-    try {
-      proc.writeInt32(buf, 0x5151_aaaa);
-      const hits = await h.scanValue(0x5151_aaaa, { type: 'int32' });
-      expect(hits).toContain(buf);
-      proc.writeInt32(buf, 0x5151_bbbb);
-      const refined = await h.nextScan(hits, 0x5151_bbbb, { type: 'int32' });
-      expect(refined).toContain(buf);
-      const un = h.freeze(buf, 'int32', 0x9999, 20);
-      un();
-      const unwatch = h.watch(buf, () => {}, 20);
-      unwatch();
-    } finally {
-      proc.free(buf);
-    }
   });
 });

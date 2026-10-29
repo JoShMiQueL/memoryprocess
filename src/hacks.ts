@@ -1,8 +1,8 @@
-import {
+import type {
   Process,
-  type ScanOptions,
-  type ScanValueOptions,
-  type ScanValueType,
+  ScanOptions,
+  ScanValueOptions,
+  ScanValueType,
 } from './process.js';
 import { ScanError, MemoryProcessError } from './errors.js';
 
@@ -92,6 +92,25 @@ const VALUE_READERS: Record<
 /* ------------------------------------------------------------------ */
 
 /**
+ * Resolve a `"module+rva"` string or a numeric base to a bigint address.
+ * Throws when a module string is given but the module isn't loaded.
+ */
+function resolveBase(proc: Process, base: number | bigint | string): bigint {
+  if (typeof base !== 'string') return BigInt(base);
+  const i = base.indexOf('+');
+  if (i === -1) return BigInt(base); // plain hex/dec address as string
+  const modName = base.slice(0, i).trim();
+  const rvaStr = base.slice(i + 1).trim();
+  const mod = proc.module(modName);
+  if (!mod)
+    throw new MemoryProcessError(
+      `module ${modName} not loaded`,
+      'MODULE_NOT_FOUND',
+    );
+  return BigInt(mod.base) + BigInt(rvaStr);
+}
+
+/**
  * A lazily-resolved pointer-chain address. `add()`/`deref()` build the chain;
  * `resolve()`/`ptr()` walk it once via {@link Process.resolvePointer}.
  *
@@ -103,26 +122,26 @@ export class Address {
   readonly base: bigint;
   readonly chain: readonly number[];
 
+  /**
+   * `base` may be:
+   * - a bigint/number virtual address, or
+   * - a Cheat-Engine-style `"module+rva"` string (`'client.dll+0xDEB99C'`,
+   *   `'game.exe+1F2A3C'`) — resolved against `proc.module(mod).base`.
+   * `chain` offsets are walked like {@link Process.resolvePointer}: every
+   * offset except the last dereferences the pointer, the last is added.
+   */
   constructor(
     private proc: Process,
-    base: number | bigint,
+    base: number | bigint | string,
     chain: readonly number[] = [],
   ) {
-    this.base = BigInt(base);
+    this.base = resolveBase(proc, base);
     this.chain = chain;
   }
 
   /** Derive a new Address with `off` appended to the chain. Immutable. */
   add(off: number | bigint): Address {
     return new Address(this.proc, this.base, [...this.chain, Number(off)]);
-  }
-
-  /**
-   * Marker documenting that the *next* `add()`/`read*()` crosses a pointer.
-   * Returns a new Address — pure no-op on the chain itself.
-   */
-  deref(): Address {
-    return this;
   }
 
   /** Final address after walking the whole chain. */
@@ -200,42 +219,143 @@ export class Address {
 }
 
 /* ------------------------------------------------------------------ */
-/* OffsetsDb — declarative pattern→resolved-address map                 */
+/* Offsets — declarative pattern→resolved-address map                    */
 /* ------------------------------------------------------------------ */
 
-export class OffsetsDb {
+/**
+ * A signature/offset database bound to a live {@link Process}.
+ *
+ * Supports the two layouts real dumper tools emit:
+ * - **cs2/GH-dumper**: `{ "client.dll": { "dwEntityList": 0xDEB99C, ... } }`
+ *   — module-keyed RVA maps (each value is an offset from the module base).
+ * - **hazedumper**: `{ signatures: { name: {module, pattern, offsets, extra,
+ *   relative, read, rva} }, netvars: { name: offset } }` — AOB-scan entries.
+ * - Flat `{ name: SigEntry | number | "mod+rva" | pattern }` also accepted.
+ *
+ * After `await off.ready()`, entries are exposed as properties:
+ * `off.dwLocalPlayer` (an {@link Address}) and `off.netvars.m_iHealth`
+ * (a field offset number) — plus `off.get(name)`/`off.resolve(name)`.
+ */
+export class Offsets {
   private entries = new Map<string, SigEntry | number>();
+  /** module-keyed rva maps: { module: { name: rva } } */
+  private moduleRvps = new Map<string, Map<string, number>>();
   private cache = new Map<string, bigint>();
   private proc?: Process;
+  /** netvars / plain field offsets (name → offset number) */
+  readonly netvars: Record<string, number> = {};
+  private resolved = false;
 
   private constructor() {}
 
-  /** Parse a hazedumper-style config or a flat `name → entry` map. */
-  static load(json: string | OffsetsJson): OffsetsDb {
-    const raw: OffsetsJson = typeof json === 'string' ? JSON.parse(json) : json;
-    const db = new OffsetsDb();
+  /**
+   * Parse an offsets config. Detects the cs2-dumper module-keyed layout
+   * (`{ "module.dll": { name: rva } }`) vs hazedumper (`signatures`/`netvars`)
+   * vs a flat name→entry map. Bind to `proc` via {@link of} or `.bind()`.
+   */
+  static load(json: string | OffsetsJson): Offsets {
+    const raw = (typeof json === 'string' ? JSON.parse(json) : json) as Record<
+      string,
+      unknown
+    >;
+    const db = new Offsets();
+
+    // cs2-dumper style: top-level keys that are modules whose value is a
+    // flat {name: number} map → each becomes an rva entry on that module.
+    const isModuleMap = (v: unknown): v is Record<string, number> =>
+      !!v &&
+      typeof v === 'object' &&
+      !Array.isArray(v) &&
+      Object.values(v).every((x) => typeof x === 'number');
+    const looksModule = (k: string) => /\.(dll|exe)$/i.test(k);
 
     const add = (name: string, e: SigEntry | number | string) => {
       if (typeof e === 'number') db.entries.set(name, e);
-      else if (typeof e === 'string') db.entries.set(name, { pattern: e });
-      else if (e && typeof e === 'object') db.entries.set(name, e as SigEntry);
+      else if (typeof e === 'string') {
+        // "mod+rva" or an AOB pattern
+        if (/[+\-]/.test(e) && !/ /.test(e)) {
+          const [mod, rva] = e.split('+', 2);
+          db.entries.set(name, { rva: Number(BigInt(rva!)), module: mod! });
+        } else db.entries.set(name, { pattern: e });
+      } else if (e && typeof e === 'object')
+        db.entries.set(name, e as SigEntry);
     };
 
-    if ('signatures' in raw || 'netvars' in raw) {
-      for (const [k, v] of Object.entries(raw.signatures ?? {})) add(k, v);
-      for (const [k, v] of Object.entries(raw.netvars ?? {})) add(k, v);
-    } else {
-      for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-        add(k, v as SigEntry | number | string);
+    const sigs = raw.signatures as
+      Record<string, SigEntry | number | string> | undefined;
+    const nets = raw.netvars as
+      Record<string, SigEntry | number | string> | undefined;
+
+    // collect module-keyed rva maps (cs2-dumper) AND flat sig entries
+    for (const [k, v] of Object.entries(raw)) {
+      if (k === 'signatures' || k === 'netvars' || k === 'timestamp') continue;
+      if (looksModule(k) && isModuleMap(v)) {
+        const m = new Map<string, number>();
+        for (const [name, rva] of Object.entries(v)) {
+          m.set(name, rva);
+          db.entries.set(name, { module: k, rva });
+        }
+        db.moduleRvps.set(k, m);
       }
     }
+    // hazedumper signatures / netvars / flat map
+    for (const [k, v] of Object.entries(sigs ?? {})) add(k, v);
+    for (const [k, v] of Object.entries(raw)) {
+      if (
+        k === 'signatures' ||
+        k === 'netvars' ||
+        k === 'timestamp' ||
+        looksModule(k)
+      )
+        continue;
+      if (
+        typeof v === 'number' ||
+        typeof v === 'string' ||
+        (v && typeof v === 'object' && 'pattern' in (v as object))
+      ) {
+        // only when not already inside a module map
+        if (!db.entries.has(k) || !looksModule(k))
+          add(k, v as SigEntry | number | string);
+      }
+    }
+    // netvars → plain field offsets
+    for (const [k, v] of Object.entries(nets ?? {})) {
+      if (typeof v === 'number') db.netvars[k] = v;
+      else if (v && typeof v === 'object' && 'offset' in (v as SigEntry))
+        db.netvars[k] = (v as SigEntry & { offset: number }).offset;
+    }
     return db;
+  }
+
+  /** Build + bind in one call: `Offsets.of(proc, json)`. */
+  static of(proc: Process, json: string | OffsetsJson): Offsets {
+    return Offsets.load(json).bind(proc);
   }
 
   /** Bind this database to a live {@link Process} (enables {@link resolve}). */
   bind(proc: Process): this {
     this.proc = proc;
     this.cache.clear();
+    this.resolved = false;
+    return this;
+  }
+
+  /**
+   * Resolve + cache every entry, then expose them as properties:
+   * `off.dwLocalPlayer` → `Address`, `off.netvars.*` → number.
+   * Call once after construction. Idempotent.
+   */
+  async ready(): Promise<this> {
+    if (this.resolved) return this;
+    for (const name of this.keys()) {
+      try {
+        const addr = await this.resolve(name);
+        (this as Record<string, unknown>)[name] = new Address(this.proc!, addr);
+      } catch {
+        // leave unresolved names as undefined — don't fail the whole ready()
+      }
+    }
+    this.resolved = true;
     return this;
   }
 
@@ -252,7 +372,7 @@ export class OffsetsDb {
   async resolve(name: string): Promise<bigint> {
     const hit = this.cache.get(name);
     if (hit !== undefined) return hit;
-    if (!this.proc) throw new Error('OffsetsDb is not bound to a Process');
+    if (!this.proc) throw new Error('Offsets is not bound to a Process');
 
     const e = this.entries.get(name);
     if (e === undefined)
@@ -552,179 +672,97 @@ export class EntityList implements Iterable<bigint | Entity> {
 }
 
 /* ------------------------------------------------------------------ */
-/* Hacks — the high-level façade                                        */
+/* Standalone helpers used by the Process methods below                 */
 /* ------------------------------------------------------------------ */
 
-export class Hacks {
-  #offsets?: OffsetsDb;
-
-  constructor(readonly proc: Process) {}
-
-  /* ---- Address ---- */
-  addr(base: number | bigint): Address {
-    return new Address(this.proc, base);
-  }
-
-  /* ---- OffsetsDb ---- */
-  /** Parse + bind an offsets config to this proc. */
-  loadOffsets(json: string | OffsetsJson): OffsetsDb {
-    this.#offsets = OffsetsDb.load(json).bind(this.proc);
-    return this.#offsets;
-  }
-
-  /** The bound offsets db (throws if {@link loadOffsets} wasn't called). */
-  offsets(): OffsetsDb {
-    if (!this.#offsets)
-      throw new Error('call loadOffsets() first — no OffsetsDb bound');
-    return this.#offsets;
-  }
-
-  /* ---- Entity ---- */
-  entity(addr: number | bigint, schema: EntitySchema): Entity {
-    return new Entity(this.proc, BigInt(addr), schema);
-  }
-
-  /* ---- EntityList ---- */
-  entityList(opts: EntityListOptions): EntityList {
-    return new EntityList(this.proc, opts);
-  }
-
-  /* ---- readMany — page-grouped batch read ---- */
-  /**
-   * Batch-read many typed values. Groups requests by 4KB page and does ONE
-   * `readSafe` per page — 10-50× fewer N-API crossings for ESP-style loops.
-   * Returns `null` for any address that can't be decoded.
-   */
-  readMany(
-    reqs: {
-      addr: number | bigint;
-      type:
-        | 'int32'
-        | 'uint32'
-        | 'int64'
-        | 'uint64'
-        | 'float'
-        | 'double'
-        | 'pointer';
-    }[],
-  ): (number | bigint | null)[] {
-    const out = new Array<number | bigint | null>(reqs.length).fill(null);
-    const PAGE = 0x1000n;
-    const byPage = new Map<
-      bigint,
-      { idx: number; off: number; type: string; width: number }[]
-    >();
-    for (let i = 0; i < reqs.length; i++) {
-      const r = reqs[i]!;
-      const a = BigInt(r.addr);
-      const page = a / PAGE;
-      const off = Number(a % PAGE);
-      const width = READ_WIDTHS[r.type];
-      if (!width) throw new TypeError(`unknown readMany type ${r.type}`);
-      let g = byPage.get(page);
-      if (!g) {
-        g = [];
-        byPage.set(page, g);
-      }
-      g.push({ idx: i, off, type: r.type, width });
+/**
+ * Batch-read many typed values. Groups requests by 4KB page and does ONE
+ * `readSafe` per page — 10-50× fewer N-API crossings for ESP-style loops.
+ * Returns `null` for any address that can't be decoded.
+ */
+export function readMany(
+  proc: Process,
+  reqs: {
+    addr: number | bigint;
+    type:
+      'int32' | 'uint32' | 'int64' | 'uint64' | 'float' | 'double' | 'pointer';
+  }[],
+): (number | bigint | null)[] {
+  const out = new Array<number | bigint | null>(reqs.length).fill(null);
+  const PAGE = 0x1000n;
+  const byPage = new Map<
+    bigint,
+    { idx: number; off: number; type: string; width: number }[]
+  >();
+  for (let i = 0; i < reqs.length; i++) {
+    const r = reqs[i]!;
+    const a = BigInt(r.addr);
+    const page = a / PAGE;
+    const off = Number(a % PAGE);
+    const width = READ_WIDTHS[r.type];
+    if (!width) throw new TypeError(`unknown readMany type ${r.type}`);
+    let g = byPage.get(page);
+    if (!g) {
+      g = [];
+      byPage.set(page, g);
     }
-    const MEM_COMMIT = 0x1000;
-    const UNREADABLE = 0x01 | 0x100; // PAGE_NOACCESS | PAGE_GUARD
-    const readableMask = 0x02 | 0x04 | 0x08 | 0x20 | 0x40 | 0x80;
-    for (const [page, list] of byPage) {
-      // readSafe zero-fills inaccessible pages — it never signals "bad", so
-      // gate on queryAddress to distinguish real 0x00000000 from unmapped.
-      const q = this.proc.queryAddress(page * PAGE);
-      if (
-        !q ||
-        q.state !== MEM_COMMIT ||
-        (q.protection & UNREADABLE) !== 0 ||
-        (q.protection & 0xff & readableMask) === 0
-      )
-        continue;
-      let buf: Buffer;
+    g.push({ idx: i, off, type: r.type, width });
+  }
+  const MEM_COMMIT = 0x1000;
+  const UNREADABLE = 0x01 | 0x100; // PAGE_NOACCESS | PAGE_GUARD
+  const readableMask = 0x02 | 0x04 | 0x08 | 0x20 | 0x40 | 0x80;
+  for (const [page, list] of byPage) {
+    // readSafe zero-fills inaccessible pages — it never signals "bad", so
+    // gate on queryAddress to distinguish real 0x00000000 from unmapped.
+    const q = proc.queryAddress(page * PAGE);
+    if (
+      !q ||
+      q.state !== MEM_COMMIT ||
+      (q.protection & UNREADABLE) !== 0 ||
+      (q.protection & 0xff & readableMask) === 0
+    )
+      continue;
+    let buf: Buffer;
+    try {
+      // Read one page + max width so straddles at the tail still decode.
+      buf = proc.readSafe(page * PAGE, 0x1000 + 8);
+    } catch {
+      continue;
+    }
+    for (const { idx, off, type, width } of list) {
+      if (off + width > buf.length) continue;
       try {
-        // Read one page + max width so straddles at the tail still decode.
-        buf = this.proc.readSafe(page * PAGE, 0x1000 + 8);
+        out[idx] = VALUE_READERS[type]!(buf, off);
       } catch {
-        continue;
-      }
-      for (const { idx, off, type, width } of list) {
-        if (off + width > buf.length) continue;
-        try {
-          out[idx] = VALUE_READERS[type]!(buf, off);
-        } catch {
-          /* leave null */
-        }
+        /* leave null */
       }
     }
-    return out;
   }
+  return out;
+}
 
-  /* ---- findPointersTo — shallow "who points at this" scan ---- */
-  /**
-   * Find all aligned locations whose stored pointer equals `target`.
-   * `scanValue` has no `'pointer'` type — encodes the needle as `uint64`
-   * (8-byte LE). Set `onlyWritable:false` to include `.rdata` pointers.
-   */
-  async findPointersTo(
-    target: number | bigint,
-    opts: {
-      module?: string;
-      start?: number | bigint;
-      end?: number | bigint;
-      onlyWritable?: boolean;
-      alignment?: number;
-    } = {},
-  ): Promise<bigint[]> {
-    // scanValue has no 'pointer' type — a uint64 LE encoding of the address
-    // is byte-identical to a stored x64 pointer.
-    return this.proc.scanValue(BigInt(target), {
-      type: 'uint64',
-      module: opts.module,
-      start: opts.start,
-      end: opts.end,
-      onlyWritable: opts.onlyWritable ?? true,
-      alignment: opts.alignment ?? this.proc.pointerSize,
-    });
-  }
-
-  /* ---- convenience passthroughs ---- */
-  scan(pattern: string, opts?: ScanOptions): Promise<bigint[]> {
-    return this.proc.scan(pattern, opts);
-  }
-  scanFirst(pattern: string, opts?: ScanOptions): Promise<bigint | null> {
-    return this.proc.scanFirst(pattern, opts);
-  }
-  scanUnique(pattern: string, opts?: ScanOptions): Promise<bigint> {
-    return this.proc.scanUnique(pattern, opts);
-  }
-  scanValue(
-    value: number | bigint,
-    opts?: ScanValueOptions,
-  ): Promise<bigint[]> {
-    return this.proc.scanValue(value, opts);
-  }
-  nextScan(
-    hits: readonly bigint[],
-    value: number | bigint,
-    opts?: { type?: ScanValueType; range?: [number | bigint, number | bigint] },
-  ): Promise<bigint[]> {
-    return this.proc.nextScan(hits, value, opts);
-  }
-  freeze(
-    addr: number | bigint,
-    type: ScanValueType,
-    value: number | bigint,
-    intervalMs?: number,
-  ): () => void {
-    return this.proc.freeze(addr, type, value, intervalMs);
-  }
-  watch(
-    addr: number | bigint,
-    cb: (n: number, o: number) => void,
-    intervalMs?: number,
-  ): () => void {
-    return this.proc.watch(addr, cb, intervalMs);
-  }
+/**
+ * Find all aligned locations whose stored pointer equals `target`.
+ * `scanValue` has no `'pointer'` type — encodes the needle as `uint64`
+ * (8-byte LE). Set `onlyWritable:false` to include `.rdata` pointers.
+ */
+export function findPointersTo(
+  proc: Process,
+  target: number | bigint,
+  opts: {
+    module?: string;
+    start?: number | bigint;
+    end?: number | bigint;
+    onlyWritable?: boolean;
+    alignment?: number;
+  } = {},
+): Promise<bigint[]> {
+  return proc.scanValue(BigInt(target), {
+    type: 'uint64',
+    module: opts.module,
+    start: opts.start,
+    end: opts.end,
+    onlyWritable: opts.onlyWritable ?? true,
+    alignment: opts.alignment ?? proc.pointerSize,
+  });
 }
