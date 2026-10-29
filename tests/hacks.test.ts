@@ -242,6 +242,84 @@ describe('Offsets — cs2-dumper + hazedumper + property access', () => {
     // @ts-expect-error proxy
     expect(off.g_i32).toBeDefined();
   });
+
+  test('ready() before bind() throws "not bound"', async () => {
+    const off = Offsets.load({ 'victim.exe': { x: 0x10 } });
+    await expect(off.ready()).rejects.toThrow('not bound');
+  });
+
+  test('flat {module, rva} SigEntry resolves', async () => {
+    using proc = Process.open(victim.pid);
+    const mod = proc.module('victim.exe')!;
+    const off = proc.offsets({
+      g_i32: {
+        module: 'victim.exe',
+        rva: Number(victim.addr.g_i32) - mod.base,
+      },
+    });
+    expect(await off.resolve('g_i32')).toBe(victim.addr.g_i32);
+  });
+
+  test('flat "mod+rva" string entry resolves', async () => {
+    using proc = Process.open(victim.pid);
+    const mod = proc.module('victim.exe')!;
+    const rva = (Number(victim.addr.g_i32) - mod.base).toString(16);
+    const off = proc.offsets({ g_i32: `victim.exe+0x${rva}` });
+    expect(await off.resolve('g_i32')).toBe(victim.addr.g_i32);
+  });
+
+  test.each([
+    ['mod-0x10', 'minus form'],
+    ['a+0x1+0x2', 'double +'],
+    ['mod+xyz', 'bad rva'],
+    ['mod+', 'empty rva'],
+  ])('Offsets.load string %j → INVALID_OFFSET_ENTRY (%s)', (s, _w) => {
+    try {
+      Offsets.load({ x: s });
+      expect.unreachable('should throw');
+    } catch (e: any) {
+      expect(e.code).toBe('INVALID_OFFSET_ENTRY');
+      expect(e.message).toContain('x');
+    }
+  });
+
+  test('reserved-name collision throws at ready(), keeps API intact', async () => {
+    using proc = Process.open(victim.pid);
+    for (const name of ['resolve', 'proc', 'entries', 'ready', 'netvars']) {
+      const off = proc.offsets({
+        signatures: { [name]: { module: 'victim.exe', rva: 0x10 } },
+      });
+      try {
+        await off.ready();
+        expect.unreachable(`ready() should throw for "${name}"`);
+      } catch (e: any) {
+        expect(e.code).toBe('RESERVED_OFFSET_NAME');
+      }
+      expect(typeof off.resolve).toBe('function');
+    }
+  });
+
+  test('bind() drops stale props bound to the old proc', async () => {
+    using proc = Process.open(victim.pid);
+    const mod = proc.module('victim.exe')!;
+    const off = proc.offsets({
+      'victim.exe': { g_i32: Number(victim.addr.g_i32) - mod.base },
+    });
+    await off.ready();
+    // @ts-expect-error populated prop
+    expect(off.g_i32).toBeDefined();
+    const proc2 = Process.open(victim.pid);
+    try {
+      off.bind(proc2);
+      // @ts-expect-error populated prop was cleared
+      expect(off.g_i32).toBeUndefined();
+      await off.ready();
+      // @ts-expect-error populated prop rebound to proc2
+      expect(off.g_i32.readInt32()).toBe(0x12345678);
+    } finally {
+      proc2.close();
+    }
+  });
 });
 
 describe('proc.entity / entityList', () => {
@@ -271,6 +349,38 @@ describe('proc.entity / entityList', () => {
     e.write('id', 0xbeef);
     expect(e.read('id')).toBe(0xbeef);
     e.write('id', 1337); // restore
+  });
+
+  test("entity 'ref' field decodes a pointer (was dead type)", () => {
+    using proc = Process.open(victim.pid);
+    const e = proc.entity(victim.addr.g_ptr, { p: [0, 'ref'] });
+    expect(e.snapshot<{ p: bigint }>().p).toBe(victim.addr.g_i32);
+    expect(e.read('p')).toBe(victim.addr.g_i32);
+  });
+
+  test.each([
+    ['string:0', 'zero width'],
+    ['string:x', 'non-numeric width'],
+    ['string:-4', 'negative width'],
+    ['wstring:0', 'zero wstring width'],
+  ])('entity schema %j rejected at compile (%s)', (type, _w) => {
+    using proc = Process.open(victim.pid);
+    expect(() =>
+      proc.entity(victim.addr.g_entity, { s: [0, type as any] }),
+    ).toThrow(TypeError);
+  });
+
+  test.each([
+    [{ stride: 4, max: -1 }, 'negative max'],
+    [{ stride: 4, max: 1e9 }, 'max over cap'],
+    [{ stride: 4, max: 1.5 }, 'non-integer max'],
+    [{ stride: 0 }, 'zero stride'],
+    [{ stride: -4 }, 'negative stride'],
+  ])('entityList rejects %j (%s)', (opts, _w) => {
+    using proc = Process.open(victim.pid);
+    expect(() => proc.entityList({ first: 0n, ...opts } as any)).toThrow(
+      TypeError,
+    );
   });
 
   test('entityList array-stride over g_array yields all 64', () => {

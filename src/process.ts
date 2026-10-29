@@ -1644,7 +1644,15 @@ export class Process implements Disposable {
     >,
   >(defs: T): { [K in keyof T]: Address } {
     const out: Record<string, Address> = {};
-    for (const [name, [base, ...chain]] of Object.entries(defs)) {
+    for (const [name, def] of Object.entries(defs)) {
+      if (!Array.isArray(def) || def.length === 0)
+        throw new TypeError(
+          `pointers() def "${name}" must be [base, ...offsets]`,
+        );
+      const [base, ...chain] = def as readonly [
+        number | bigint | string,
+        ...number[],
+      ];
       out[name] = new Address(this, base, chain);
     }
     return out as { [K in keyof T]: Address };

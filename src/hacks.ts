@@ -1,4 +1,5 @@
 import type {
+  ModuleInfo,
   Process,
   ScanOptions,
   ScanValueOptions,
@@ -10,7 +11,7 @@ import { ScanError, MemoryProcessError } from './errors.js';
 /* Types                                                                */
 /* ------------------------------------------------------------------ */
 
-/** Primitive field kinds understood by {@link Entity} / {@link Hacks.readMany}. */
+/** Primitive field kinds understood by {@link Entity} / {@link Process.readMany}. */
 export type FieldType =
   | 'int32'
   | 'uint32'
@@ -87,6 +88,19 @@ const VALUE_READERS: Record<
   pointer: (b, o) => b.readBigUInt64LE(o),
 };
 
+/** Pointer-width-aware scalar width: 'pointer'/'ref' follow `ptrSize`. */
+function scalarWidth(type: string, ptrSize: number): number | undefined {
+  if (type === 'pointer' || type === 'ref') return ptrSize;
+  return READ_WIDTHS[type];
+}
+
+/** Read a pointer of the target's width (4 on WoW64, 8 native). */
+function readPtr(buf: Buffer, off: number, ptrSize: number): bigint {
+  return ptrSize === 4
+    ? BigInt(buf.readUInt32LE(off))
+    : buf.readBigUInt64LE(off);
+}
+
 /* ------------------------------------------------------------------ */
 /* Address — cached base + fluent offset/deref chain                    */
 /* ------------------------------------------------------------------ */
@@ -131,20 +145,36 @@ function resolveBase(
   proc: Process,
   base: number | bigint | string,
 ): { base: bigint; rvaInString: bigint } {
-  if (typeof base !== 'string') return { base: BigInt(base), rvaInString: 0n };
+  if (typeof base !== 'string') {
+    if (typeof base === 'number' && !Number.isInteger(base))
+      throw new MemoryProcessError(
+        `invalid address base ${base} — must be an integer`,
+        'INVALID_ADDRESS_EXPR',
+      );
+    return { base: BigInt(base), rvaInString: 0n };
+  }
   const s = base.trim();
   const plus = s.indexOf('+');
   const minus = s.indexOf('-');
 
   if (plus === -1) {
-    if (minus > 0)
+    if (minus > 0) {
+      // 'mod-rva' is never a valid expression — but the whole string may be a
+      // legitimate dashed module name ('my-mod.dll'). Report the better error.
+      if (!proc.module(s)) {
+        throw new MemoryProcessError(
+          `module ${s} not loaded`,
+          'MODULE_NOT_FOUND',
+        );
+      }
       throw new MemoryProcessError(
         `invalid address "${s}" — use 'module+rva' ('-' offsets aren't supported in the base expression; put negative offsets in the chain)`,
         'INVALID_ADDRESS_EXPR',
       );
+    }
     if (LOOKS_LIKE_MODULE.test(s) && !/^0[xX]/.test(s)) {
       // bare module name reaching here means it isn't loaded —
-      // isModuleName() checks first and diverts to the module+rva path.
+      // moduleFor() checks first and diverts to the module+rva path.
       throw new MemoryProcessError(
         `module ${s} not loaded`,
         'MODULE_NOT_FOUND',
@@ -175,11 +205,20 @@ function resolveBase(
   return { base: BigInt(mod.base) + rva, rvaInString: rva };
 }
 
-/** True when `base` is a bare module name (no `+`) that resolves to a loaded module. */
-function isModuleName(proc: Process, base: number | bigint | string): boolean {
-  if (typeof base !== 'string') return false;
+/**
+ * Bare module name (no `+`) resolving to a loaded module → its ModuleInfo,
+ * else undefined. Cheap regex pre-filter avoids a Toolhelp snapshot for
+ * numeric-looking strings. Caller reuses the result — one lookup per Address.
+ */
+function moduleFor(
+  proc: Process,
+  base: number | bigint | string,
+): ModuleInfo | undefined {
+  if (typeof base !== 'string') return undefined;
   const s = base.trim();
-  return !s.includes('+') && proc.module(s) !== undefined;
+  if (s.includes('+')) return undefined;
+  if (!LOOKS_LIKE_MODULE.test(s) || /^0[xX]/.test(s)) return undefined;
+  return proc.module(s);
 }
 
 /**
@@ -218,12 +257,12 @@ export class Address {
     base: number | bigint | string,
     chain: readonly number[] = [],
   ) {
-    if (isModuleName(proc, base)) {
-      const mod = proc.module((base as string).trim())!;
+    const mod = moduleFor(proc, base);
+    if (mod) {
       const [rva, ...rest] = chain;
       if (rva !== undefined && (!Number.isFinite(rva) || rva < 0))
         throw new MemoryProcessError(
-          `invalid rva ${rva} for module '${base}' — must be ≥ 0`,
+          `invalid rva ${rva} for module '${base}' — must be a finite integer ≥ 0`,
           'INVALID_ADDRESS_EXPR',
         );
       this.base = BigInt(mod.base) + BigInt(rva ?? 0);
@@ -232,10 +271,16 @@ export class Address {
     }
 
     const { base: resolved, rvaInString } = resolveBase(proc, base);
+    const c0 = chain[0];
+    if (chain.length > 0 && c0 !== undefined && !Number.isInteger(c0))
+      throw new MemoryProcessError(
+        `invalid chain offset ${c0} — chain offsets must be integers`,
+        'INVALID_ADDRESS_EXPR',
+      );
     if (
       rvaInString !== 0n &&
       chain.length > 0 &&
-      BigInt(chain[0]!) === rvaInString
+      BigInt(c0 as number) === rvaInString
     ) {
       throw new MemoryProcessError(
         `ambiguous expression "${base}" + chain[0]=${chain[0]}: the rva ` +
@@ -358,6 +403,8 @@ export class Offsets {
   /** netvars / plain field offsets (name → offset number) */
   readonly netvars: Record<string, number> = {};
   private resolved = false;
+  /** Entry names populated as own properties by ready() (removed on re-bind). */
+  private populated = new Set<string>();
 
   private constructor() {}
 
@@ -383,15 +430,51 @@ export class Offsets {
     const looksModule = (k: string) => /\.(dll|exe)$/i.test(k);
 
     const add = (name: string, e: SigEntry | number | string) => {
-      if (typeof e === 'number') db.entries.set(name, e);
-      else if (typeof e === 'string') {
-        // "mod+rva" or an AOB pattern
-        if (/[+\-]/.test(e) && !/ /.test(e)) {
-          const [mod, rva] = e.split('+', 2);
-          db.entries.set(name, { rva: Number(BigInt(rva!)), module: mod! });
-        } else db.entries.set(name, { pattern: e });
-      } else if (e && typeof e === 'object')
-        db.entries.set(name, e as SigEntry);
+      if (typeof e === 'number') {
+        db.entries.set(name, e);
+        return;
+      }
+      if (typeof e === 'string') {
+        const s = e.trim();
+        if (s.includes('+')) {
+          // 'module+rva' — exactly one '+', both sides required.
+          const parts = s.split('+');
+          if (parts.length !== 2 || !parts[0]!.trim() || !parts[1]!.trim())
+            throw new MemoryProcessError(
+              `invalid offset entry "${name}": "${e}" — expected 'module+rva'`,
+              'INVALID_OFFSET_ENTRY',
+            );
+          let rva: bigint;
+          try {
+            rva = BigInt(parts[1]!.trim());
+          } catch {
+            throw new MemoryProcessError(
+              `invalid offset entry "${name}": bad rva "${parts[1]}" — expected unsigned hex/dec`,
+              'INVALID_OFFSET_ENTRY',
+            );
+          }
+          if (rva < 0n || rva > BigInt(Number.MAX_SAFE_INTEGER))
+            throw new MemoryProcessError(
+              `invalid offset entry "${name}": rva out of range`,
+              'INVALID_OFFSET_ENTRY',
+            );
+          db.entries.set(name, {
+            rva: Number(rva),
+            module: parts[0]!.trim(),
+          });
+          return;
+        }
+        if (s.includes('-') && !/^[0-9a-fA-F? ]+$/.test(s))
+          // dashed non-pattern ('mod-0x10') — '-' is never legal in an entry
+          throw new MemoryProcessError(
+            `invalid offset entry "${name}": "${e}" — use 'module+rva' ('-' is not supported)`,
+            'INVALID_OFFSET_ENTRY',
+          );
+        // AOB pattern — scanUnique validates the bytes at resolve time.
+        db.entries.set(name, { pattern: e });
+        return;
+      }
+      if (e && typeof e === 'object') db.entries.set(name, e as SigEntry);
     };
 
     const sigs = raw.signatures as
@@ -424,11 +507,14 @@ export class Offsets {
       if (
         typeof v === 'number' ||
         typeof v === 'string' ||
-        (v && typeof v === 'object' && 'pattern' in (v as object))
+        (v &&
+          typeof v === 'object' &&
+          ('pattern' in (v as object) ||
+            'rva' in (v as object) ||
+            'offsets' in (v as object)))
       ) {
-        // only when not already inside a module map
-        if (!db.entries.has(k) || !looksModule(k))
-          add(k, v as SigEntry | number | string);
+        // don't clobber an entry already collected from a module map
+        if (!db.entries.has(k)) add(k, v as SigEntry | number | string);
       }
     }
     // netvars → plain field offsets
@@ -450,20 +536,35 @@ export class Offsets {
     this.proc = proc;
     this.cache.clear();
     this.resolved = false;
+    // Drop stale Address properties bound to the PREVIOUS proc — leaving them
+    // would read from the wrong process while resolve() uses the new one.
+    for (const name of this.populated)
+      delete (this as Record<string, unknown>)[name];
+    this.populated.clear();
     return this;
   }
 
   /**
    * Resolve + cache every entry, then expose them as properties:
    * `off.dwLocalPlayer` → `Address`, `off.netvars.*` → number.
-   * Call once after construction. Idempotent.
+   * Call once after construction/bind. Idempotent. Requires a bound proc;
+   * entry names colliding with Offsets members throw rather than clobber them.
    */
   async ready(): Promise<this> {
+    if (!this.proc) throw new Error('Offsets is not bound to a Process');
     if (this.resolved) return this;
+    for (const name of this.keys()) {
+      if (name in this)
+        throw new MemoryProcessError(
+          `offset name "${name}" collides with a reserved Offsets member — rename it in the database`,
+          'RESERVED_OFFSET_NAME',
+        );
+    }
     for (const name of this.keys()) {
       try {
         const addr = await this.resolve(name);
-        (this as Record<string, unknown>)[name] = new Address(this.proc!, addr);
+        (this as Record<string, unknown>)[name] = new Address(this.proc, addr);
+        this.populated.add(name);
       } catch {
         // leave unresolved names as undefined — don't fail the whole ready()
       }
@@ -577,28 +678,44 @@ interface CompiledField {
   width: number; // bytes
 }
 
-function compileSchema(schema: EntitySchema): {
+function compileSchema(
+  schema: EntitySchema,
+  ptrSize: number,
+): {
   fields: CompiledField[];
   size: number;
 } {
   const fields: CompiledField[] = [];
   let size = 0;
   for (const [name, [offset, type]] of Object.entries(schema)) {
-    const w = fieldWidth(type);
+    const w = fieldWidth(type, ptrSize);
     fields.push({ name, offset, type, width: w });
     if (offset + w > size) size = offset + w;
   }
   return { fields, size };
 }
 
-function fieldWidth(type: FieldType): number {
-  if (type.startsWith('string:')) return Number.parseInt(type.slice(7), 10);
-  if (type.startsWith('wstring:'))
-    return Number.parseInt(type.slice(8), 10) * 2;
+function stringWidth(type: FieldType, prefix: string, mult: number): number {
+  const raw = type.slice(prefix.length);
+  if (!/^\d+$/.test(raw))
+    throw new TypeError(
+      `invalid ${prefix} width in field type "${type}" — expected a positive integer`,
+    );
+  const n = Number.parseInt(raw, 10);
+  if (n <= 0)
+    throw new TypeError(
+      `invalid ${prefix} width in field type "${type}" — must be > 0`,
+    );
+  return n * mult;
+}
+
+function fieldWidth(type: FieldType, ptrSize: number): number {
+  if (type.startsWith('string:')) return stringWidth(type, 'string:', 1);
+  if (type.startsWith('wstring:')) return stringWidth(type, 'wstring:', 2);
   if (type === 'vec2') return 8;
   if (type === 'vec3') return 12;
   if (type === 'vec4') return 16;
-  const w = READ_WIDTHS[type];
+  const w = scalarWidth(type, ptrSize);
   if (!w) throw new TypeError(`unknown entity field type ${type}`);
   return w;
 }
@@ -607,6 +724,7 @@ function decodeField(
   buf: Buffer,
   off: number,
   type: FieldType,
+  ptrSize = 8,
 ): number | bigint | string | { x: number; y: number; z?: number; w?: number } {
   if (type.startsWith('string:')) {
     const max = Number.parseInt(type.slice(7), 10);
@@ -642,7 +760,8 @@ function decodeField(
       z: buf.readFloatLE(off + 8),
       w: buf.readFloatLE(off + 12),
     };
-  if (type === 'ref') return buf.readBigUInt64LE(off);
+  if (type === 'ref') return readPtr(buf, off, ptrSize);
+  if (type === 'pointer') return readPtr(buf, off, ptrSize);
   const r = VALUE_READERS[type];
   if (!r) throw new TypeError(`cannot decode field type ${type}`);
   return r(buf, off);
@@ -652,13 +771,15 @@ function decodeField(
 export class Entity {
   private fields: CompiledField[];
   private size: number;
+  private ptrSize: number;
 
   constructor(
     private proc: Process,
     readonly addr: bigint,
     schema: EntitySchema,
   ) {
-    const c = compileSchema(schema);
+    this.ptrSize = proc.pointerSize;
+    const c = compileSchema(schema, this.ptrSize);
     this.fields = c.fields;
     this.size = c.size;
   }
@@ -671,7 +792,7 @@ export class Entity {
     const buf = this.proc.readBuffer(this.addr, this.size);
     const out: Record<string, unknown> = {};
     for (const f of this.fields)
-      out[f.name] = decodeField(buf, f.offset, f.type);
+      out[f.name] = decodeField(buf, f.offset, f.type, this.ptrSize);
     return out as T;
   }
 
@@ -685,12 +806,8 @@ export class Entity {
     | { x: number; y: number; z?: number; w?: number } {
     const f = this.fields.find((x) => x.name === name);
     if (!f) throw new RangeError(`unknown entity field ${name}`);
-    if (f.type.startsWith('string:') || f.type.startsWith('wstring:')) {
-      const buf = this.proc.readBuffer(this.addr + BigInt(f.offset), f.width);
-      return decodeField(buf, 0, f.type);
-    }
     const buf = this.proc.readBuffer(this.addr + BigInt(f.offset), f.width);
-    return decodeField(buf, 0, f.type);
+    return decodeField(buf, 0, f.type, this.ptrSize);
   }
 
   /** Live-write a single field. */
@@ -703,9 +820,14 @@ export class Entity {
         return this.proc.writeWideString(at, value);
       return this.proc.writeString(at, value);
     }
-    const w = VALUE_READERS[f.type] ? f.width : 0;
+    const w =
+      f.type === 'ref' || VALUE_READERS[f.type] !== undefined ? f.width : 0;
     if (!w) throw new TypeError(`field ${name} is not a scalar`);
-    if (f.type === 'int64' || f.type === 'uint64' || f.type === 'pointer')
+    if (f.type === 'pointer' || f.type === 'ref')
+      return this.ptrSize === 4
+        ? this.proc.writeUInt32(at, Number(BigInt(value) & 0xffffffffn))
+        : this.proc.writePointer(at, BigInt(value));
+    if (f.type === 'int64' || f.type === 'uint64')
       return this.proc.writePointer(at, BigInt(value));
     const buf = Buffer.alloc(w);
     if (f.type === 'float') buf.writeFloatLE(Number(value));
@@ -736,6 +858,9 @@ export interface EntityListOptions {
 }
 
 export class EntityList implements Iterable<bigint | Entity> {
+  /** Safety cap on `max` — prevents accidental OOM/hang in toArray(). */
+  static readonly MAX_ELEMENTS = 1_000_000;
+
   constructor(
     private proc: Process,
     private opts: EntityListOptions,
@@ -743,6 +868,16 @@ export class EntityList implements Iterable<bigint | Entity> {
     if (opts.next === undefined && opts.stride === undefined)
       throw new TypeError(
         'EntityList needs either `next` (linked) or `stride` (array)',
+      );
+    if (
+      opts.stride !== undefined &&
+      (!Number.isInteger(opts.stride) || opts.stride <= 0)
+    )
+      throw new TypeError('EntityList `stride` must be an integer > 0');
+    const max = opts.max ?? 4096;
+    if (!Number.isInteger(max) || max < 0 || max > EntityList.MAX_ELEMENTS)
+      throw new TypeError(
+        `EntityList \`max\` must be an integer between 0 and ${EntityList.MAX_ELEMENTS}`,
       );
   }
 
@@ -803,6 +938,7 @@ export function readMany(
 ): (number | bigint | null)[] {
   const out = new Array<number | bigint | null>(reqs.length).fill(null);
   const PAGE = 0x1000n;
+  const ptrSize = proc.pointerSize;
   const byPage = new Map<
     bigint,
     { idx: number; off: number; type: string; width: number }[]
@@ -812,7 +948,7 @@ export function readMany(
     const a = BigInt(r.addr);
     const page = a / PAGE;
     const off = Number(a % PAGE);
-    const width = READ_WIDTHS[r.type];
+    const width = scalarWidth(r.type, ptrSize);
     if (!width) throw new TypeError(`unknown readMany type ${r.type}`);
     let g = byPage.get(page);
     if (!g) {
@@ -823,6 +959,10 @@ export function readMany(
   }
   const MEM_COMMIT = 0x1000;
   const UNREADABLE = 0x01 | 0x100; // PAGE_NOACCESS | PAGE_GUARD
+  // R/RW/RX/RWX/EXECUTE_READ/EXECUTE_READWRITE — PAGE_EXECUTE (0x10) is
+  // deliberately excluded: it's rare in user-mode and ReadProcessMemory on
+  // execute-only pages is inconsistent, so readMany returns null there
+  // (where readBuffer would attempt the read and fail differently).
   const readableMask = 0x02 | 0x04 | 0x08 | 0x20 | 0x40 | 0x80;
   for (const [page, list] of byPage) {
     // readSafe zero-fills inaccessible pages — it never signals "bad", so
@@ -845,7 +985,10 @@ export function readMany(
     for (const { idx, off, type, width } of list) {
       if (off + width > buf.length) continue;
       try {
-        out[idx] = VALUE_READERS[type]!(buf, off);
+        out[idx] =
+          type === 'pointer'
+            ? readPtr(buf, off, ptrSize)
+            : VALUE_READERS[type]!(buf, off);
       } catch {
         /* leave null */
       }
@@ -857,7 +1000,8 @@ export function readMany(
 /**
  * Find all aligned locations whose stored pointer equals `target`.
  * `scanValue` has no `'pointer'` type — encodes the needle as `uint64`
- * (8-byte LE). Set `onlyWritable:false` to include `.rdata` pointers.
+ * (8-byte LE) or `uint32` on WoW64 targets. Set `onlyWritable:false` to
+ * include `.rdata` pointers.
  */
 export function findPointersTo(
   proc: Process,
@@ -871,7 +1015,7 @@ export function findPointersTo(
   } = {},
 ): Promise<bigint[]> {
   return proc.scanValue(BigInt(target), {
-    type: 'uint64',
+    type: proc.pointerSize === 4 ? 'uint32' : 'uint64',
     module: opts.module,
     start: opts.start,
     end: opts.end,

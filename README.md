@@ -19,6 +19,7 @@ Read and write **Windows process memory** from Node.js, Bun, or Deno. N-API nati
 - **Threads** — list/suspend/resume, `mainThread`, whole-process `suspendProcess`/`resumeProcess`, `getThreadContext`/`setThreadContext`, hardware breakpoints (DR0–DR3), `callRemote`
 - **DLL injection** — `injectDll`/`ejectDll` round-trip via remote `LoadLibraryA`/`FreeLibrary`
 - **Query** — `queryAddress` (VirtualQueryEx), `regions()`, `resolvePointer` chains, `resolveRIPRelative`, `watch` polling, `waitForExit`, `isWow64`/`pointerSize`
+- **Cheat-dev helpers** — `Address`/`addr()`/`pointers()` CE-style pointer chains, `Entity`/`entityList()` typed struct views, `readMany` page-batched reads, `findPointersTo` pointer-scan, `Offsets` sig databases (cs2-dumper + hazedumper)
 - **Typed errors** — `ProcessNotFoundError`, `AccessDeniedError`, `ReadError`, `WriteError`, `ScanError`, `InjectError` (each with `.code`/`.win32code`)
 
 ## Install
@@ -119,14 +120,14 @@ for (const m of proc.modules()) console.log(m.path, '0x' + m.base.toString(16));
 
 ### Memory management & query
 
-| Method         | Signature                           | Description                                                            |
-| -------------- | ----------------------------------- | ---------------------------------------------------------------------- |
-| `alloc`        | `(size, prot?, nearAddr?) → bigint` | `VirtualAllocEx` (default RWX; `nearAddr` = hint)                      |
-| `free`         | `(addr) → boolean`                  | `VirtualFreeEx`                                                        |
-| `protect`      | `(addr, size, prot) → number`       | `VirtualProtectEx`; returns old protection                             |
-| `queryAddress` | `(addr) → MemoryInfo \| null`       | `VirtualQueryEx` (base, size, state, protection, type, allocationBase) |
-| `regions`      | `() → Region[]`                     | All committed regions                                                  |
-| `findCodeCave` | `(minLen, opts?) → bigint \| null`  | Run of 0x00/0xCC in executable memory                                  |
+| Method         | Signature                                             | Description                                                                                             |
+| -------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `alloc`        | `(size, prot?, nearAddr?) → bigint`                   | `VirtualAllocEx` (default RWX; `nearAddr` = hint)                                                       |
+| `free`         | `(addr) → boolean`                                    | `VirtualFreeEx`                                                                                         |
+| `protect`      | `(addr, size, prot) → number`                         | `VirtualProtectEx`; returns old protection                                                              |
+| `queryAddress` | `(addr) → Region & { allocationBase, state } \| null` | `VirtualQueryEx` on one address — region fields plus `allocationBase`/`state` (MEM_COMMIT/RESERVE/FREE) |
+| `regions`      | `() → Region[]`                                       | All committed regions                                                                                   |
+| `findCodeCave` | `(minLen, opts?) → bigint \| null`                    | Run of 0x00/0xCC in executable memory                                                                   |
 
 ### Pattern scan (async)
 
@@ -161,19 +162,22 @@ Types: `'int32' | 'uint32' | 'int64' | 'uint64' | 'float' | 'double'` (`'pointer
 
 ### Threads & process control
 
-| Method                             | Signature                                       | Description                                 |
-| ---------------------------------- | ----------------------------------------------- | ------------------------------------------- |
-| `threads`                          | `() → number[]`                                 | Thread IDs                                  |
-| `mainThread`                       | `→ number \| null` (getter)                     | Main thread ID                              |
-| `suspendThread` / `resumeThread`   | `(tid) → boolean`                               | Per-thread control                          |
-| `suspendAll` / `resumeAll`         | `() → number[]` / `() → void`                   | All threads                                 |
-| `suspendProcess` / `resumeProcess` | `() → boolean`                                  | Atomic `NtSuspendProcess`/`NtResumeProcess` |
-| `getThreadContext`                 | `(tid) → ThreadContext \| null`                 | rip/rsp/rbp/dr0–3/dr7/eflags (bigint)       |
-| `setThreadContext`                 | `(tid, partial) → boolean`                      | Write back context fields                   |
-| `hwBreakpoint`                     | `(tid, addr, slot 0-3, size?) → boolean`        | DR register breakpoint; **suspend first**   |
-| `clearHwBreakpoint`                | `(tid, slot) → boolean`                         | Clear DR slot                               |
-| `callRemote`                       | `(fnAddr, param?, timeoutMs?) → number \| null` | `CreateRemoteThread`; returns exit code     |
-| `waitForExit`                      | `(timeoutMs?) → Promise<number \| null>`        | Process exit code, or null on timeout       |
+| Method                             | Signature                                       | Description                                                                                                                                                             |
+| ---------------------------------- | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `threads`                          | `() → number[]`                                 | Thread IDs                                                                                                                                                              |
+| `mainThread`                       | `→ number \| null` (getter)                     | Main thread ID                                                                                                                                                          |
+| `suspendThread` / `resumeThread`   | `(tid) → boolean`                               | Per-thread control                                                                                                                                                      |
+| `suspendAll` / `resumeAll`         | `() → number[]` / `() → void`                   | All threads                                                                                                                                                             |
+| `suspendProcess` / `resumeProcess` | `() → boolean`                                  | Atomic `NtSuspendProcess`/`NtResumeProcess`                                                                                                                             |
+| `getThreadContext`                 | `(tid) → ThreadContext \| null`                 | rip/rsp/rbp/dr0–3/dr7/eflags (bigint)                                                                                                                                   |
+| `setThreadContext`                 | `(tid, partial) → boolean`                      | Write back context fields                                                                                                                                               |
+| `hwBreakpoint`                     | `(tid, addr, slot 0-3, size?, kind?) → boolean` | DR register breakpoint; `kind`: `'exec'`/`'write'`/`'readwrite'` — **suspend first**; without a debugger a hit crashes the target (use `findWhatWrites` for write hits) |
+| `clearHwBreakpoint`                | `(tid, slot) → boolean`                         | Clear DR slot                                                                                                                                                           |
+| `callRemote`                       | `(fnAddr, param?, timeoutMs?) → number \| null` | `CreateRemoteThread`; returns exit code                                                                                                                                 |
+| `waitForExit`                      | `(timeoutMs?) → Promise<number \| null>`        | Process exit code, or null on timeout                                                                                                                                   |
+| `findWhatWrites`                   | `(addr, opts?) → Promise<Hit[]>`                | CE "find what writes": temporary debugger + hardware write breakpoint on all threads; returns `{rip, tid, threadContext}[]`                                             |
+
+`findWhatWrites` opts: `{ size?: 1|2|4|8 = 4, timeoutMs? = 1000 (max 60000), maxHits? = 32 (max 1024) }`. Attaches a temporary debugger, watches for `timeoutMs`, then detaches leaving the target running. `rip` points at the instruction _following_ the write (trap semantics, same as CE). Needs debug rights — call `Process.enableDebugPrivilege()` first.
 
 ### Injection & helpers
 
@@ -186,6 +190,70 @@ Types: `'int32' | 'uint32' | 'int64' | 'uint64' | 'float' | 'double'` (`'pointer
 | `watch`                   | `(addr, cb, ms?) → () => void` | Poll `readInt32`; returns unsubscribe |
 | `isWow64` / `pointerSize` | getters → `boolean` / `number` | Bitness info                          |
 
+### Cheat-dev helpers
+
+High-level Cheat Engine–style API layered over the primitives. Exported classes: `Address`, `Entity`, `EntityList`, `Offsets`; types: `EntitySchema`, `FieldType`, `SigEntry`, `OffsetsJson`, `EntityListOptions`.
+
+| Method           | Signature                                      | Description                                                        |
+| ---------------- | ---------------------------------------------- | ------------------------------------------------------------------ |
+| `addr`           | `(base, ...chain) → Address`                   | Fluent pointer-chain address (see forms below)                     |
+| `pointers`       | `({name: [base, ...chain]}) → {name: Address}` | Named CE-style address table; resolves lazily                      |
+| `entity`         | `(addr, schema) → Entity`                      | Typed struct view: `snapshot()` (one read) / `read`/`write` fields |
+| `entityList`     | `(opts) → EntityList`                          | Iterable entity walk — array `stride` or linked-list `next`        |
+| `readMany`       | `(reqs) → (number \| bigint \| null)[]`        | Page-batched bulk read — one `readSafe` per touched 4KB page       |
+| `findPointersTo` | `(target, opts?) → Promise<bigint[]>`          | "Who points at this" — finds aligned locations storing `target`    |
+| `offsets`        | `(json) → Offsets`                             | Parse a sig/offset database bound to this process                  |
+
+**`addr` / `Address` forms** — the canonical form spells the module and RVA as separate args:
+
+```ts
+proc.addr('game.exe', 0x1f2a3c, 0x10, 0x28, 0x8); // canonical: module, rva, ...chain
+proc.addr('game.exe+0x1F2A3C', 0x10, 0x28, 0x8); // CE paste-friendly
+proc.addr(mod.base + 0x1f2a3cn, 0x10, 0x28, 0x8); // raw bigint base
+```
+
+In the `'mod+rva'` and bigint forms every `chain` offset is a dereference hop — the rva is already inside the base. Writing `addr('mod+0x100', 0x100, …)` (rva repeated as `chain[0]`) throws `AMBIGUOUS_ADDRESS_EXPR`; pass the numeric base if that deref is really intended. Malformed expressions throw `INVALID_ADDRESS_EXPR`, a missing module `MODULE_NOT_FOUND` (all `MemoryProcessError` subclasses via `.code`).
+
+The returned `Address` has `.base`/`.chain` (immutable — `.add(off)` derives a new one), `.resolve()`/`.ptr()` for the final address, and typed `readX`/`writeX`/`readBuffer`/`readString` methods that resolve-then-access.
+
+**`pointers`** — a named chain table; nothing touches memory until a read/resolve:
+
+```ts
+const p = proc.pointers({
+  health: ['game.exe', 0x1f2a3c, 0x10, 0x28, 0x8],
+  money: ['game.exe+0x2B4D80', 0x8],
+});
+p.health.readInt32();
+p.money.writeInt32(999);
+```
+
+**`entity`** — `schema` maps field names to `[offset, type]`. `FieldType`: `'int32'|'uint32'|'int64'|'uint64'|'float'|'double'|'pointer'|'string:N'|'wstring:N'|'vec2'|'vec3'|'vec4'|'ref'`. `snapshot()` does ONE `readBuffer` covering the whole schema — cheap per-frame read for ESP/aimbot loops.
+
+**`entityList`** — `{ first, stride | next, schema?, max? = 4096 }`. `stride` = array element size; `next` = offset of the next-pointer inside each node. Yields addresses, or `Entity` views when `schema` is set. Iterable + `toArray()`.
+
+**`readMany`** — `reqs`: `{ addr, type }[]` where `type` is `'int32'|'uint32'|'int64'|'uint64'|'float'|'double'|'pointer'`; returns `null` per entry that can't be decoded.
+
+**`findPointersTo`** — shallow pointer-scan (encodes `target` as u64 via `scanValue`). `opts`: `{ module?, start?, end?, onlyWritable? = true, alignment? = pointerSize }`.
+
+**`offsets` / `Offsets`** — parses both real dumper layouts:
+
+- **cs2/GH-dumper**: `{ "client.dll": { "dwEntityList": 0xDEB99C, … } }` — module-keyed RVA maps.
+- **hazedumper**: `{ signatures: { name: {module, pattern, offsets, extra, relative, read, rva} }, netvars: { name: offset } }` — AOB-scan entries.
+
+```ts
+const off = proc.offsets(json);
+await off.ready(); // resolves + caches all entries
+off.dwLocalPlayer.readInt32(); // each resolved name is an Address
+off.netvars.m_iHealth; // netvars are plain field-offset numbers
+await off.resolve('dwEntityList'); // → bigint address (cached)
+await off.addr('name'); // → Address
+await off.resolveAll(); // → { name: bigint }
+off.keys(); // all loaded offset names
+// Also usable unbound: const db = Offsets.load(json); db.bind(proc);
+```
+
+`SigEntry` fields: `pattern` (AOB with `?` wildcards), `module`, `offsets` (rip-displacement position / deref chain), `extra` (hazedumper addend), `relative` (RIP-relative operand), `read` (`'u32'|'u64'|'ptr'` deref width at `hit + offsets[0]`), `rva` (static module offset). Unknown names throw `UNKNOWN_OFFSET`, malformed entries `INVALID_OFFSET_ENTRY`.
+
 ### Constants & errors
 
 `Protection` (`PAGE_*`, plus unprefixed aliases), `AllocationType` (`MEM_*`), `ProcessAccess` (`ALL`, `VM_READ`, `READ_WRITE_QUERY`, …).
@@ -194,7 +262,7 @@ All failures throw subclasses of `MemoryProcessError` with `.code` and `.win32co
 
 ## Examples
 
-See [`examples/`](examples/): `basic-read.ts`, `pointer-chain.ts`, `inject-dll.ts`, `code-cave.ts`, `hook-function.ts`, `value-hunt.ts` (scanValue → nextScan → freeze).
+See [`examples/`](examples/): `basic-read.ts`, `pointer-chain.ts`, `pointer-chains.ts` (addr/pointers/Offsets cheat-table), `inject-dll.ts`, `code-cave.ts`, `hook-function.ts`, `value-hunt.ts` (scanValue → nextScan → freeze).
 
 ## Platform support
 
