@@ -10,6 +10,10 @@ permissions:
 
 jobs:
   release-please:
+    # Only run on main — on feature branches (where this file is new) GitHub
+    # evaluates the workflow on push even though branches:[main] excludes it,
+    # producing a spurious 'workflow file issue' failure. Guard explicitly.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: googleapis/release-please-action@v4
