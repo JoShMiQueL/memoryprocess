@@ -32,6 +32,8 @@ export interface ThreadContext {
   dr1: bigint;
   dr2: bigint;
   dr3: bigint;
+  /** Debug status register — B0..B3 bits identify which breakpoint fired. */
+  dr6: bigint;
   dr7: bigint;
   eflags: bigint;
 }
@@ -911,30 +913,55 @@ export class Process implements Disposable {
   // ---- tier-3: hardware breakpoints ----
 
   /**
-   * Arm a hardware EXECUTION breakpoint in Dr{slot} (0-3) on thread `tid`.
-   * Sets RW=00 (execute) and LEN for `size` (1|2|4|8; only 1 is meaningful for
-   * execution breakpoints) plus the local-enable bit in Dr7.
+   * Arm a hardware breakpoint in Dr{slot} (0-3) on thread `tid`.
+   * `kind`: 'exec' (RW=00, the default) | 'write' (RW=01, data writes) |
+   * 'readwrite' (RW=11, data reads+writes). LEN encodes `size` (1|2|4|8);
+   * for 'exec' the CPU requires LEN=00 (ignored otherwise).
    * Suspend the thread first, then resume with {@link resumeThread}.
+   *
+   * WARNING: without a debugger attached to the target, a fired hardware
+   * breakpoint delivers an unhandled #DB and usually crashes it. Use
+   * {@link findWhatWrites} (which owns the debug session) for write hits.
    */
   hwBreakpoint(
     tid: number,
     addr: bigint | number,
     slot: 0 | 1 | 2 | 3,
     size: 1 | 2 | 4 | 8 = 1,
+    kind: 'exec' | 'write' | 'readwrite' = 'exec',
   ): boolean {
     this.assertOpen();
     if (!Number.isInteger(slot) || slot < 0 || slot > 3)
       throw new RangeError('slot must be 0..3');
     if (size !== 1 && size !== 2 && size !== 4 && size !== 8)
       throw new RangeError('size must be 1|2|4|8');
+    const rwBits =
+      kind === 'exec'
+        ? 0n
+        : kind === 'write'
+          ? 1n
+          : kind === 'readwrite'
+            ? 3n
+            : (() => {
+                throw new TypeError(`unknown breakpoint kind ${kind}`);
+              })();
     const ctx = this.getThreadContext(tid);
     if (!ctx) return false;
-    // Intel Dr7 LEN encoding: 00=1 byte, 01=2, 11=4, 10=8
-    const lenBits = size === 1 ? 0n : size === 2 ? 1n : size === 4 ? 3n : 2n;
+    // Intel Dr7 LEN encoding: 00=1 byte, 01=2, 11=4, 10=8 (exec forces 00)
+    const lenBits =
+      kind === 'exec'
+        ? 0n
+        : size === 1
+          ? 0n
+          : size === 2
+            ? 1n
+            : size === 4
+              ? 3n
+              : 2n;
     const shift = BigInt(16 + slot * 4);
     let dr7 = ctx.dr7;
     dr7 &= ~(0xfn << shift); // clear RW+LEN for this slot
-    dr7 |= lenBits << shift; // RW=00 (exec), LEN=size
+    dr7 |= (rwBits | (lenBits << 2n)) << shift;
     dr7 |= 1n << BigInt(slot * 2); // local enable L{slot}
     const patch: Record<string, bigint> = { dr7 };
     patch[`dr${slot}`] = BigInt(addr);
@@ -955,6 +982,49 @@ export class Process implements Disposable {
     const patch: Record<string, bigint> = { dr7 };
     patch[`dr${slot}`] = 0n;
     return this.setThreadContext(tid, patch);
+  }
+
+  /**
+   * Cheat Engine "find what writes to this address": attaches a temporary
+   * debugger (DebugActiveProcess), arms a hardware WRITE breakpoint (Dr7
+   * RW=01) on every thread, pumps the debug event loop for `timeoutMs`
+   * collecting EXCEPTION_SINGLE_STEP hits, then restores debug registers and
+   * detaches — the target is left running and un-debugged.
+   *
+   * Returns up to `maxHits` records. `rip` is the address reported by the
+   * CPU; because a data breakpoint is a *trap* it fires AFTER the write, so
+   * `rip` points at the instruction FOLLOWING the write (same caveat CE has).
+   * `threadContext` is the full register snapshot at the hit (incl. dr6).
+   *
+   * Requires permission to debug the target — call
+   * {@link Process.enableDebugPrivilege} first (needed even for your own
+   * children on some systems; win32 5 otherwise).
+   */
+  findWhatWrites(
+    addr: bigint | number,
+    opts: {
+      /** breakpoint width in bytes (default 4; must be 1|2|4|8) */
+      size?: 1 | 2 | 4 | 8;
+      /** how long to watch, ms (default 1000, max 60000) */
+      timeoutMs?: number;
+      /** stop after this many hits (default 32, max 1024) */
+      maxHits?: number;
+    } = {},
+  ): Promise<{ rip: bigint; tid: number; threadContext: ThreadContext }[]> {
+    this.assertOpen();
+    checkAddr(addr);
+    const size = opts.size ?? 4;
+    if (size !== 1 && size !== 2 && size !== 4 && size !== 8)
+      throw new RangeError('size must be 1|2|4|8');
+    const timeoutMs = opts.timeoutMs ?? 1000;
+    const maxHits = opts.maxHits ?? 32;
+    return native.findWhatWrites(
+      this.pid,
+      addr,
+      size,
+      timeoutMs,
+      maxHits,
+    ) as Promise<{ rip: bigint; tid: number; threadContext: ThreadContext }[]>;
   }
 
   // ---- tier-3: code cave ----

@@ -10,6 +10,14 @@ export type {
   ThreadContext,
 } from './process.js';
 export { Protection, AllocationType, ProcessAccess } from './process.js';
+export { Hacks, Address, Entity, EntityList, OffsetsDb } from './hacks.js';
+export type {
+  EntitySchema,
+  FieldType,
+  SigEntry,
+  OffsetsJson,
+  EntityListOptions,
+} from './hacks.js';
 export {
   MemoryProcessError,
   ProcessNotFoundError,

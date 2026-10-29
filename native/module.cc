@@ -4,6 +4,7 @@
 #include <tlhelp32.h>
 #include <cmath>
 #include <cstring>
+#include <string>
 extern "C" {
 #include "hde/hde64.h"
 }
@@ -536,7 +537,7 @@ static bool GetFullContext(DWORD tid, CONTEXT& ctx) {
   return ok != 0;
 }
 
-// getThreadContext(tid) -> { rip,rsp,rbp,dr0,dr1,dr2,dr3,dr7,eflags } | null
+// getThreadContext(tid) -> { rip,rsp,rbp,dr0..dr3,dr6,dr7,eflags } | null
 // NOTE: caller is expected to have suspended the thread first.
 Napi::Value GetThreadContextSync(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
@@ -555,6 +556,7 @@ Napi::Value GetThreadContextSync(const Napi::CallbackInfo& info) {
   o.Set("dr1", Napi::BigInt::New(env, static_cast<std::uint64_t>(ctx.Dr1)));
   o.Set("dr2", Napi::BigInt::New(env, static_cast<std::uint64_t>(ctx.Dr2)));
   o.Set("dr3", Napi::BigInt::New(env, static_cast<std::uint64_t>(ctx.Dr3)));
+  o.Set("dr6", Napi::BigInt::New(env, static_cast<std::uint64_t>(ctx.Dr6)));
   o.Set("dr7", Napi::BigInt::New(env, static_cast<std::uint64_t>(ctx.Dr7)));
   o.Set("eflags", Napi::BigInt::New(env, static_cast<std::uint64_t>(ctx.EFlags)));
   return o;
@@ -566,7 +568,7 @@ static bool JsToU64(const Napi::Value& v, std::uint64_t& out) {
   return false;
 }
 
-// setThreadContext(tid, { rip?, rsp?, dr0?, dr1?, dr2?, dr3?, dr7? }) -> boolean
+// setThreadContext(tid, { rip?, rsp?, rbp?, dr0?..dr3?, dr6?, dr7?, eflags? }) -> boolean
 // Reads the current context, patches provided fields, writes it back.
 Napi::Value SetThreadContextSync(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
@@ -591,6 +593,7 @@ Napi::Value SetThreadContextSync(const Napi::CallbackInfo& info) {
   set("dr1", *reinterpret_cast<std::uint64_t*>(&ctx.Dr1));
   set("dr2", *reinterpret_cast<std::uint64_t*>(&ctx.Dr2));
   set("dr3", *reinterpret_cast<std::uint64_t*>(&ctx.Dr3));
+  set("dr6", *reinterpret_cast<std::uint64_t*>(&ctx.Dr6));
   set("dr7", *reinterpret_cast<std::uint64_t*>(&ctx.Dr7));
   if (patch.Has("eflags") && JsToU64(patch.Get("eflags"), v)) ctx.EFlags = static_cast<DWORD>(v);
 
@@ -793,6 +796,406 @@ Napi::Value WaitForExitAsync(const Napi::CallbackInfo& info) {
   auto deferred = Napi::Promise::Deferred::New(env);
   auto promise = deferred.Promise();
   auto* w = new WaitExitWorker(env, std::move(deferred), pid, timeout);
+  w->Queue();
+  return promise;
+}
+
+// ---------- findWhatWrites (DebugActiveProcess + HW write breakpoints) ----------
+
+// Hardware breakpoints only deliver their #DB exception to a debugger attached
+// to the TARGET — setting Dr regs without a debug loop just crashes the victim
+// with an unhandled EXCEPTION_SINGLE_STEP. So the CE "find what writes" flow
+// must own a real debugger session: DebugActiveProcess -> arm RW=01 data
+// breakpoints on every thread -> pump WaitForDebugEvent collecting
+// EXCEPTION_SINGLE_STEP hits -> restore Dr regs, ContinueDebugEvent, detach.
+//
+// NOTE on `rip`: a data breakpoint is a *trap* — it fires AFTER the write, so
+// the reported address is the instruction FOLLOWING the write, not the writer
+// itself. CE shows the same caveat; disassemble backwards to find the store.
+
+#ifndef DBG_CONTINUE
+#define DBG_CONTINUE 0x00010002L
+#endif
+#ifndef DBG_EXCEPTION_NOT_HANDLED
+#define DBG_EXCEPTION_NOT_HANDLED 0x80010001L
+#endif
+
+namespace {
+
+struct FwwHit {
+  std::uint64_t rip = 0;
+  DWORD tid = 0;
+  CONTEXT ctx{};
+};
+
+struct ArmedThread {
+  DWORD tid = 0;
+  int slot = -1;
+  std::uint64_t origDr = 0;
+  std::uint64_t origDr7 = 0;
+};
+
+// LEN encoding for Dr7: 00=1B, 01=2B, 11=4B, 10=8B (validated 1|2|4|8 by TS).
+static std::uint64_t LenBits(unsigned size) {
+  switch (size) {
+    case 1: return 0;
+    case 2: return 1;
+    case 8: return 2;
+    default: return 3; // 4
+  }
+}
+
+// Arm a RW=01 (data write) breakpoint on the first free Dr slot of `hThread`.
+// `hThread` may be a handle from CREATE_THREAD/CREATE_PROCESS debug events or
+// OpenThread; it must allow GET/SET_CONTEXT and SUSPEND_RESUME. Suspend+resume
+// is balanced (net-zero suspend count) so threads already suspended by the
+// debug attach stay suspended and running threads stay running.
+// Returns slot (0-3) on success and fills origDr/origDr7 for restore; -1 on
+// failure.
+static int ArmWriteBp(HANDLE hThread, std::uint64_t addr, unsigned size,
+                      std::uint64_t& origDr, std::uint64_t& origDr7) {
+  if (SuspendThread(hThread) == (DWORD)-1) return -1;
+  int slot = -1;
+  do {
+    CONTEXT ctx{};
+    ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    if (!GetThreadContext(hThread, &ctx)) break;
+    std::uint64_t dr7 = ctx.Dr7;
+    for (int s = 0; s < 4; s++) {
+      if ((dr7 & (0x3ull << (s * 2))) == 0) { slot = s; break; } // L+G clear
+    }
+    if (slot < 0) break;
+    origDr7 = dr7;
+    origDr = (&ctx.Dr0)[slot];
+    const std::uint64_t shift = 16ull + slot * 4;
+    dr7 &= ~(0xfull << shift);          // clear RW+LEN
+    dr7 |= (0x1ull | (LenBits(size) << 2)) << shift; // RW=01 write, LEN=size
+    dr7 |= 1ull << (slot * 2);          // local enable L{slot}
+    ctx.Dr7 = dr7;
+    (&ctx.Dr0)[slot] = addr;
+    ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    if (!SetThreadContext(hThread, &ctx)) { slot = -1; break; }
+  } while (0);
+  ResumeThread(hThread);
+  return slot;
+}
+
+static void DisarmBp(HANDLE hThread, int slot, std::uint64_t origDr,
+                     std::uint64_t origDr7) {
+  if (SuspendThread(hThread) == (DWORD)-1) return;
+  CONTEXT ctx{};
+  ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+  if (GetThreadContext(hThread, &ctx)) {
+    ctx.Dr7 = origDr7;
+    (&ctx.Dr0)[slot] = origDr;
+    ctx.Dr6 = 0;
+    ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    SetThreadContext(hThread, &ctx);
+  }
+  ResumeThread(hThread);
+}
+
+class FindWhatWritesWorker : public Napi::AsyncWorker {
+public:
+  FindWhatWritesWorker(Napi::Env env, Napi::Promise::Deferred deferred,
+                       DWORD pid, std::uint64_t addr, unsigned size,
+                       DWORD timeoutMs, unsigned maxHits)
+      : Napi::AsyncWorker(env), deferred_(deferred), pid_(pid), addr_(addr),
+        size_(size), timeoutMs_(timeoutMs), maxHits_(maxHits) {}
+
+  ~FindWhatWritesWorker() override {
+    for (HANDLE h : openHandles_) CloseHandle(h);
+  }
+
+  // Attach is best-effort: callers may need enableDebugPrivilege() first for
+  // protected targets. DebugSetProcessKillOnExit(false) keeps the debuggee
+  // alive when our process exits while still attached.
+  void Execute() override {
+    // Detach completion is asynchronous on Windows — a fresh
+    // DebugActiveProcess immediately after DebugActiveProcessStop can return
+    // ERROR_ACCESS_DENIED while the kernel tears down the debug port. Retry
+    // for up to ~500ms so back-to-back findWhatWrites calls work.
+    DWORD err = 0;
+    bool ok = false;
+    for (int i = 0; i < 50 && !ok; i++) {
+      ok = DebugActiveProcess(pid_) != 0;
+      if (!ok) { err = GetLastError(); Sleep(10); }
+    }
+    if (!ok) {
+      SetError("DebugActiveProcess failed (win32 " + std::to_string(err) + ")");
+      return;
+    }
+    attached_ = true;
+    DebugSetProcessKillOnExit(FALSE);
+
+    const ULONGLONG armDeadline = GetTickCount64() + 500;
+    const ULONGLONG deadline = GetTickCount64() + timeoutMs_;
+
+    // Phase 1: collect the attach-time event burst (CREATE_PROCESS,
+    // LOAD_DLLs, CREATE_THREAD per existing thread, initial breakpoint) and
+    // arm each reported thread. Threads reported by CREATE_THREAD are already
+    // debug-suspended at this point; our suspend/resume pair is balanced so
+    // the bp is on before they can run. Hits are collected here too — a thread
+    // armed+continued early in this loop can fire while we drain the rest.
+    int quietWaits = 0;
+    while (quietWaits < 3 && GetTickCount64() < armDeadline &&
+           hits_.size() < maxHits_ && !exited_) {
+      DEBUG_EVENT ev{};
+      if (!WaitForDebugEvent(&ev, 20)) { quietWaits++; continue; }
+      quietWaits = 0;
+      ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, HandleEvent(ev));
+    }
+    // Fallback: arm anything the event burst missed (rare — attach reports
+    // every thread, but belt-and-suspenders for filtered/racy cases).
+    ArmSnapshotThreads();
+
+    // Phase 2: collect hits until timeout / maxHits / process exit.
+    while (!exited_ && hits_.size() < maxHits_ && GetTickCount64() < deadline) {
+      const ULONGLONG left = deadline - GetTickCount64();
+      DEBUG_EVENT ev{};
+      if (!WaitForDebugEvent(&ev, left > 25 ? 25 : (DWORD)left)) continue;
+      ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, HandleEvent(ev));
+    }
+
+    // Phase 3: disarm every armed thread (restoring ORIGINAL Dr regs — the
+    // target may legitimately use its own hw breakpoints), drain pending
+    // events, disarm any stragglers hit mid-disarm, drain again, detach.
+    // Everything runs on this thread — DebugActiveProcess/Continue/DebugStop
+    // are debugger-thread-bound.
+    auto disarmAll = [this]() {
+      for (auto& at : armed_) {
+        HANDLE t = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT |
+                                  THREAD_SUSPEND_RESUME,
+                              FALSE, at.tid);
+        if (!t) continue;
+        DisarmBp(t, at.slot, at.origDr, at.origDr7);
+        CloseHandle(t);
+      }
+    };
+    auto drain = [this]() {
+      DEBUG_EVENT ev{};
+      for (int i = 0; i < 64 && WaitForDebugEvent(&ev, 2); i++) {
+        if (ev.dwDebugEventCode == CREATE_PROCESS_DEBUG_EVENT &&
+            ev.u.CreateProcessInfo.hFile)
+          CloseHandle(ev.u.CreateProcessInfo.hFile);
+        if (ev.dwDebugEventCode == LOAD_DLL_DEBUG_EVENT && ev.u.LoadDll.hFile)
+          CloseHandle(ev.u.LoadDll.hFile);
+        // A queued single-step is our bp firing mid-disarm — swallow it
+        // (DBG_CONTINUE). A queued genuine exception gets NOT_HANDLED so it
+        // reaches the debuggee's SEH as it would without us.
+        DWORD disp = DBG_CONTINUE;
+        if (ev.dwDebugEventCode == EXCEPTION_DEBUG_EVENT &&
+            ev.u.Exception.ExceptionRecord.ExceptionCode !=
+                EXCEPTION_SINGLE_STEP &&
+            ev.u.Exception.ExceptionRecord.ExceptionCode !=
+                EXCEPTION_BREAKPOINT)
+          disp = DBG_EXCEPTION_NOT_HANDLED;
+        ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, disp);
+        if (ev.dwDebugEventCode == EXIT_PROCESS_DEBUG_EVENT) break;
+      }
+    };
+    disarmAll();
+    drain();      // flush pending bp hits + resume stopped threads
+    disarmAll();  // threads stopped on a queued event during pass 1 skipped
+                  // SetThreadContext — disarm them now that they're resumed
+    drain();      // release the last stopped threads, empty the port
+    DebugActiveProcessStop(pid_);
+    attached_ = false;
+  }
+
+  void OnOK() override {
+    Napi::Env env = Env();
+    auto arr = Napi::Array::New(env, hits_.size());
+    for (size_t i = 0; i < hits_.size(); i++) {
+      auto o = Napi::Object::New(env);
+      const FwwHit& h = hits_[i];
+      o.Set("rip", Napi::BigInt::New(env, h.rip));
+      o.Set("tid", Napi::Number::New(env, static_cast<double>(h.tid)));
+      auto c = Napi::Object::New(env);
+      c.Set("rip", Napi::BigInt::New(env, static_cast<std::uint64_t>(h.ctx.Rip)));
+      c.Set("rsp", Napi::BigInt::New(env, static_cast<std::uint64_t>(h.ctx.Rsp)));
+      c.Set("rbp", Napi::BigInt::New(env, static_cast<std::uint64_t>(h.ctx.Rbp)));
+      c.Set("dr0", Napi::BigInt::New(env, static_cast<std::uint64_t>(h.ctx.Dr0)));
+      c.Set("dr1", Napi::BigInt::New(env, static_cast<std::uint64_t>(h.ctx.Dr1)));
+      c.Set("dr2", Napi::BigInt::New(env, static_cast<std::uint64_t>(h.ctx.Dr2)));
+      c.Set("dr3", Napi::BigInt::New(env, static_cast<std::uint64_t>(h.ctx.Dr3)));
+      c.Set("dr6", Napi::BigInt::New(env, static_cast<std::uint64_t>(h.ctx.Dr6)));
+      c.Set("dr7", Napi::BigInt::New(env, static_cast<std::uint64_t>(h.ctx.Dr7)));
+      c.Set("eflags", Napi::BigInt::New(env, static_cast<std::uint64_t>(h.ctx.EFlags)));
+      o.Set("threadContext", c);
+      arr.Set(i, o);
+    }
+    deferred_.Resolve(arr);
+  }
+
+  void OnError(const Napi::Error& e) override {
+    deferred_.Reject(e.Value());
+  }
+
+private:
+  // Returns the ContinueDebugEvent disposition for `ev`; also feeds side
+  // effects (arming, hit collection, handle tracking).
+  DWORD HandleEvent(const DEBUG_EVENT& ev) {
+    switch (ev.dwDebugEventCode) {
+      case EXCEPTION_DEBUG_EVENT: {
+        const auto& er = ev.u.Exception.ExceptionRecord;
+        if (er.ExceptionCode == EXCEPTION_SINGLE_STEP) {
+          return HandleSingleStep(ev);
+        }
+        // The attach-time int3 (and any target int3) is debugger-handled.
+        if (er.ExceptionCode == EXCEPTION_BREAKPOINT) return DBG_CONTINUE;
+        // Everything else belongs to the debuggee's SEH chain.
+        return DBG_EXCEPTION_NOT_HANDLED;
+      }
+      case CREATE_THREAD_DEBUG_EVENT: {
+        const DWORD tid = ev.dwThreadId;
+        HANDLE t = ev.u.CreateThread.hThread; // owned by debuggee, NOT us
+        ArmOnHandle(tid, t);
+        return DBG_CONTINUE;
+      }
+      case CREATE_PROCESS_DEBUG_EVENT: {
+        if (ev.u.CreateProcessInfo.hFile) CloseHandle(ev.u.CreateProcessInfo.hFile);
+        ArmOnHandle(ev.dwThreadId, ev.u.CreateProcessInfo.hThread);
+        return DBG_CONTINUE;
+      }
+      case LOAD_DLL_DEBUG_EVENT: {
+        if (ev.u.LoadDll.hFile) CloseHandle(ev.u.LoadDll.hFile);
+        return DBG_CONTINUE;
+      }
+      case EXIT_THREAD_DEBUG_EVENT:
+        // If it was armed there's nothing to restore — the thread is gone.
+        return DBG_CONTINUE;
+      case EXIT_PROCESS_DEBUG_EVENT:
+        exited_ = true;
+        return DBG_CONTINUE;
+      case RIP_EVENT:
+      case OUTPUT_DEBUG_STRING_EVENT:
+      case UNLOAD_DLL_DEBUG_EVENT:
+      default:
+        return DBG_CONTINUE;
+    }
+  }
+
+  DWORD HandleSingleStep(const DEBUG_EVENT& ev) {
+    const DWORD tid = ev.dwThreadId;
+    HANDLE t = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, tid);
+    if (!t) return DBG_EXCEPTION_NOT_HANDLED;
+    CONTEXT ctx{};
+    ctx.ContextFlags = CONTEXT_ALL | CONTEXT_DEBUG_REGISTERS;
+    bool ours = false;
+    if (GetThreadContext(t, &ctx)) {
+      int slot = -1;
+      for (const auto& at : armed_)
+        if (at.tid == tid) { slot = at.slot; break; }
+      if (slot >= 0 && (ctx.Dr6 & (1ull << slot))) ours = true;
+      if (ours) {
+        FwwHit h;
+        h.rip = static_cast<std::uint64_t>(
+            reinterpret_cast<std::uintptr_t>(
+                ev.u.Exception.ExceptionRecord.ExceptionAddress));
+        h.tid = tid;
+        h.ctx = ctx;
+        hits_.push_back(h);
+        ctx.Dr6 = 0; // acknowledge so a stale B bit can't false-trigger
+        SetThreadContext(t, &ctx);
+      }
+    }
+    CloseHandle(t);
+    // Ours -> swallowed; foreign single-steps (e.g. target's own TF use) go
+    // back unhandled so we don't silently swallow them.
+    return ours ? DBG_CONTINUE : DBG_EXCEPTION_NOT_HANDLED;
+  }
+
+  void ArmOnHandle(DWORD tid, HANDLE hThread) {
+    if (!hThread) return;
+    for (const auto& at : armed_)
+      if (at.tid == tid) return; // already armed
+    ArmedThread at;
+    at.tid = tid;
+    at.slot = ArmWriteBp(hThread, addr_, size_, at.origDr, at.origDr7);
+    if (at.slot >= 0) armed_.push_back(at);
+  }
+
+  // Arm threads the event burst didn't report (Toolhelp fallback).
+  void ArmSnapshotThreads() {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    THREADENTRY32 te{};
+    te.dwSize = sizeof(te);
+    if (Thread32First(snap, &te)) {
+      do {
+        if (te.th32OwnerProcessID != pid_) continue;
+        bool armed = false;
+        for (const auto& at : armed_)
+          if (at.tid == te.th32ThreadID) { armed = true; break; }
+        if (armed) continue;
+        HANDLE t = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT |
+                                  THREAD_SUSPEND_RESUME,
+                              FALSE, te.th32ThreadID);
+        if (!t) continue;
+        ArmedThread at;
+        at.tid = te.th32ThreadID;
+        at.slot = ArmWriteBp(t, addr_, size_, at.origDr, at.origDr7);
+        if (at.slot >= 0) { armed_.push_back(at); openHandles_.push_back(t); }
+        else CloseHandle(t);
+      } while (Thread32Next(snap, &te));
+    }
+    CloseHandle(snap);
+  }
+
+  Napi::Promise::Deferred deferred_;
+  DWORD pid_;
+  std::uint64_t addr_;
+  unsigned size_;
+  DWORD timeoutMs_;
+  unsigned maxHits_;
+  bool attached_ = false;
+  bool exited_ = false;
+  std::vector<ArmedThread> armed_;
+  std::vector<FwwHit> hits_;
+  // Toolhelp-armed threads keep their handle so phase 3 could disarm via the
+  // SAME handle if needed; closed in dtor.
+  std::vector<HANDLE> openHandles_;
+};
+
+} // anonymous namespace
+
+// findWhatWrites(pid, address, size, timeoutMs, maxHits) ->
+//   Promise<{rip, tid, threadContext}[]>
+Napi::Value FindWhatWritesAsync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 2 || !info[0].IsNumber()) {
+    Napi::TypeError::New(env, "expected (pid, address[, size, timeoutMs, maxHits])")
+        .ThrowAsJavaScriptException();
+    return env.Null();
+  }
+  DWORD pid = info[0].As<Napi::Number>().Uint32Value();
+  std::uint64_t addr = 0;
+  if (!JsToU64(info[1], addr)) {
+    Napi::TypeError::New(env, "address must be number|bigint").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+  unsigned size = 4;
+  if (info.Length() > 2 && info[2].IsNumber())
+    size = info[2].As<Napi::Number>().Uint32Value();
+  if (size != 1 && size != 2 && size != 4 && size != 8) {
+    Napi::RangeError::New(env, "size must be 1|2|4|8").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+  DWORD timeout = 1000;
+  if (info.Length() > 3 && info[3].IsNumber()) {
+    double t = info[3].As<Napi::Number>().DoubleValue();
+    if (std::isfinite(t) && t > 0 && t <= 60000) timeout = static_cast<DWORD>(t);
+  }
+  unsigned maxHits = 32;
+  if (info.Length() > 4 && info[4].IsNumber()) {
+    double m = info[4].As<Napi::Number>().DoubleValue();
+    if (std::isfinite(m) && m >= 1) maxHits = m > 1024 ? 1024u : static_cast<unsigned>(m);
+  }
+  auto deferred = Napi::Promise::Deferred::New(env);
+  auto promise = deferred.Promise();
+  auto* w = new FindWhatWritesWorker(env, std::move(deferred), pid, addr, size,
+                                     timeout, maxHits);
   w->Queue();
   return promise;
 }

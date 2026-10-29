@@ -83,6 +83,7 @@ interface Native {
     dr1: bigint;
     dr2: bigint;
     dr3: bigint;
+    dr6: bigint;
     dr7: bigint;
     eflags: bigint;
   } | null;
@@ -97,6 +98,7 @@ interface Native {
         | 'dr1'
         | 'dr2'
         | 'dr3'
+        | 'dr6'
         | 'dr7'
         | 'eflags',
         number | bigint
@@ -118,6 +120,30 @@ interface Native {
   resumeProcess(pid: number): boolean;
   enableDebugPrivilege(): boolean;
   waitForExit(pid: number, timeoutMs?: number): Promise<number | null>;
+  findWhatWrites(
+    pid: number,
+    address: number | bigint,
+    size: number,
+    timeoutMs: number,
+    maxHits: number,
+  ): Promise<
+    {
+      rip: bigint;
+      tid: number;
+      threadContext: {
+        rip: bigint;
+        rsp: bigint;
+        rbp: bigint;
+        dr0: bigint;
+        dr1: bigint;
+        dr2: bigint;
+        dr3: bigint;
+        dr6: bigint;
+        dr7: bigint;
+        eflags: bigint;
+      };
+    }[]
+  >;
 }
 
 // Resolution order: dist/memoryprocess.node (built/packaged) -> prebuilds via

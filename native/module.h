@@ -45,5 +45,6 @@ Napi::Value SuspendProcessSync(const Napi::CallbackInfo& info);      // NtSuspen
 Napi::Value ResumeProcessSync(const Napi::CallbackInfo& info);       // NtResumeProcess
 Napi::Value EnableDebugPrivilegeSync(const Napi::CallbackInfo& info);// SeDebugPrivilege on self
 Napi::Value WaitForExitAsync(const Napi::CallbackInfo& info);        // async WaitForSingleObject
+Napi::Value FindWhatWritesAsync(const Napi::CallbackInfo& info);     // DebugActiveProcess + HW write-bp loop
 
 } // namespace mp

@@ -33,6 +33,7 @@ static Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("resumeProcess", Napi::Function::New(env, mp::ResumeProcessSync));
   exports.Set("enableDebugPrivilege", Napi::Function::New(env, mp::EnableDebugPrivilegeSync));
   exports.Set("waitForExit", Napi::Function::New(env, mp::WaitForExitAsync));
+  exports.Set("findWhatWrites", Napi::Function::New(env, mp::FindWhatWritesAsync));
   return exports;
 }
 
