@@ -27,14 +27,14 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Lint
-        run: bun lint --type-aware
-
       - name: Format check
         run: bun fmt --check
 
       - name: Typecheck
         run: bun run typecheck
+
+      - name: Bun check
+        run: bun run check
 
       - name: Build native addon
         run: bun run build
@@ -64,6 +64,9 @@ jobs:
 
       - name: Build test victim
         run: node scripts/build-victim.mjs
+
+      - name: Build test DLL
+        run: node scripts/build-testdll.mjs
 
       - name: Test (bun)
         run: bun test
