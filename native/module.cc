@@ -3,6 +3,7 @@
 #include <system_error>
 #include <tlhelp32.h>
 #include <cmath>
+#include <cstring>
 extern "C" {
 #include "hde/hde64.h"
 }
@@ -13,6 +14,10 @@ namespace mp {
 // non-finite / absurd `size` values blowing up std::vector across the N-API
 // boundary (a length_error crossing N-API aborts the process).
 static const double MAX_READ_BYTES = 512.0 * 1024.0 * 1024.0;
+
+// NOTE: handles and addresses cross N-API as doubles — above 2^53 they would
+// silently round. Harmless today (canonical user-space VA < 2^48, real HANDLE
+// values are small) but don't feed pointers >2^53 through these bindings.
 
 static bool CheckSize(Napi::Env env, double size) {
   if (!std::isfinite(size) || size < 0 || size > MAX_READ_BYTES) {
@@ -210,7 +215,7 @@ Napi::Value ListThreadsSync(const Napi::CallbackInfo& info) {
   if (info.Length() < 1 || !info[0].IsNumber()) { Napi::TypeError::New(env, "expected pid").ThrowAsJavaScriptException(); return env.Null(); }
   DWORD pid = info[0].As<Napi::Number>().Uint32Value();
   HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-  if (snap == INVALID_HANDLE_VALUE) return env.Null();
+  if (snap == INVALID_HANDLE_VALUE) return Napi::Array::New(env, 0); // callers expect number[], never null
   std::vector<DWORD> tids;
   THREADENTRY32 te{}; te.dwSize = sizeof(te);
   if (Thread32First(snap, &te)) {
@@ -651,6 +656,7 @@ Napi::Value DisasmInstructionsSync(const Napi::CallbackInfo& info) {
   auto addr = static_cast<std::uintptr_t>(info[1].As<Napi::Number>().DoubleValue());
   auto count = static_cast<std::size_t>(info[2].As<Napi::Number>().DoubleValue());
   if (count == 0) return Napi::Array::New(env, 0);
+  if (count > 256) count = 256; // 256*15 ≈ 4KB window; also prevents count*16 wraparound
 
   std::size_t readSize = count * 16;   // max x64 instruction length is 15
   if (readSize > 4096) readSize = 4096;
@@ -669,8 +675,15 @@ Napi::Value DisasmInstructionsSync(const Napi::CallbackInfo& info) {
   auto arr = Napi::Array::New(env);
   std::size_t off = 0, n = 0;
   while (off < buf.size() && n < count) {
+    // hde64_disasm takes no length and may read up to 15 bytes for one
+    // instruction — feeding it buf.data()+off directly walks past the end of
+    // the allocation on a truncated tail. Decode from a 16-byte padded stack
+    // scratch instead; the trailing zeros make a truncated insn fail cleanly.
+    std::uint8_t scratch[16] = {};
+    const std::size_t avail = buf.size() - off;
+    std::memcpy(scratch, buf.data() + off, avail < sizeof(scratch) ? avail : sizeof(scratch));
     hde64s hs{};
-    unsigned int len = hde64_disasm(buf.data() + off, &hs);
+    unsigned int len = hde64_disasm(scratch, &hs);
     if (len == 0 || (hs.flags & F_ERROR)) break;
     if (off + len > buf.size()) break;   // truncated tail instruction
     auto o = Napi::Object::New(env);

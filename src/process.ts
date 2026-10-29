@@ -79,12 +79,40 @@ export interface ScanValueOptions {
   alignment?: number
 }
 
-const toNum = (v: number | bigint | undefined) => (v === undefined ? undefined : Number(v))
+// Convert a start/end bound to a finite number; undefined stays undefined so
+// the native side can apply its default. Non-finite or garbage input throws
+// rather than silently scanning [0, user-top] or nothing.
+const toNum = (v: number | bigint | undefined): number | undefined => {
+  if (v === undefined) return undefined
+  const n = Number(v)
+  if (!Number.isFinite(n)) throw new RangeError('start/end must be a finite number')
+  return n
+}
 
 const MAX_READ_BYTES = 512 * 1024 * 1024
 function checkSize(size: number): void {
   if (!Number.isFinite(size) || size < 0 || size > MAX_READ_BYTES)
     throw new RangeError('size must be a finite number between 0 and 512MB')
+}
+
+// Guard: the native layer uses unchecked As<Number>/As<String> casts, so a
+// wrong-typed JS arg becomes a pending N-API exception — then the C++ code
+// throws AGAIN (napi_throw while an exception is pending) and Bun aborts with
+// "NAPI FATAL ERROR". Validate every arg that must be a Number/String here,
+// before it can cross the boundary with a bad type.
+function checkNumber(v: unknown, name: string): asserts v is number {
+  if (typeof v !== 'number')
+    throw new TypeError(`${name} must be a number`)
+  if (Number.isNaN(v))
+    throw new RangeError(`${name} must be a number`)
+}
+function checkAddr(v: unknown, name = 'address'): asserts v is number | bigint {
+  if (typeof v !== 'number' && typeof v !== 'bigint')
+    throw new TypeError(`${name} must be number|bigint`)
+}
+function checkStr(v: unknown, name: string): asserts v is string {
+  if (typeof v !== 'string')
+    throw new TypeError(`${name} must be a string`)
 }
 
 // Encode a typed little-endian value for value scans / writes.
@@ -120,6 +148,9 @@ const VALUE_WIDTHS: Record<WriteValueType, number> = {
   int32: 4, uint32: 4, float: 4, int64: 8, uint64: 8, double: 8, pointer: 8,
 }
 
+/** Types accepted by scanValue/nextScan ('pointer' is write-only). */
+const VALID_SCAN_TYPES: readonly ScanValueType[] = ['int32', 'uint32', 'int64', 'uint64', 'float', 'double']
+
 const REL32_MIN = -0x80000000n
 const REL32_MAX = 0x7fffffffn
 function checkRel32(rel: bigint): void {
@@ -130,6 +161,9 @@ function checkRel32(rel: bigint): void {
 export class Process implements Disposable {
   #handle: number
   readonly pid: number
+  // freeze()/watch() intervals — tracked so close() can kill them; otherwise
+  // they keep polling handle 0 forever after close.
+  #timers = new Set<ReturnType<typeof setInterval>>()
 
   private constructor(handle: number, pid: number) {
     this.#handle = handle
@@ -144,6 +178,8 @@ export class Process implements Disposable {
    */
   static open(nameOrPid: string | number, opts?: { access?: number } | number): Process {
     const access = typeof opts === 'number' ? opts : opts?.access
+    if (access !== undefined && (typeof access !== 'number' || !Number.isFinite(access)))
+      throw new TypeError('access must be a number')
     try {
       const { handle, pid } = native.openProcess(nameOrPid, access)
       return new Process(handle, pid)
@@ -187,6 +223,8 @@ export class Process implements Disposable {
 
   readBuffer(addr: number | bigint, size: number): Buffer {
     this.assertOpen()
+    checkAddr(addr)
+    checkNumber(size, 'size')
     checkSize(size)
     try { return native.readBuffer(this.#handle, Number(addr), size) }
     catch { throw new ReadError(addr) }
@@ -222,6 +260,8 @@ export class Process implements Disposable {
    */
   readSafe(addr: number | bigint, size: number): Buffer {
     this.assertOpen()
+    checkAddr(addr)
+    checkNumber(size, 'size')
     checkSize(size)
     try { return native.readSafe(this.#handle, Number(addr), size) }
     catch (e: any) { throw new ReadError(addr, e?.win32code) }
@@ -240,6 +280,8 @@ export class Process implements Disposable {
 
   readValueAt(addr: number | bigint, type: string): number | bigint {
     this.assertOpen()
+    checkAddr(addr)
+    checkStr(type, 'type')
     try { return native.readValue(this.#handle, Number(addr), type) }
     catch { throw new ReadError(addr) }
   }
@@ -255,6 +297,7 @@ export class Process implements Disposable {
 
   #read<T extends number | bigint>(addr: number | bigint, type: string): T {
     this.assertOpen()
+    checkAddr(addr)
     try { return native.readValue(this.#handle, Number(addr), type) as T }
     catch { throw new ReadError(addr) }
   }
@@ -273,6 +316,9 @@ export class Process implements Disposable {
   /** Write raw bytes. */
   writeBuffer(addr: number | bigint, data: Buffer | Uint8Array): boolean {
     this.assertOpen()
+    checkAddr(addr)
+    if (!(data instanceof Uint8Array) && typeof data !== 'string')
+      throw new TypeError('data must be a Buffer or Uint8Array')
     const ok = native.writeBuffer(this.#handle, Number(addr), Buffer.from(data))
     if (!ok) throw new WriteError(addr)
     return ok
@@ -280,6 +326,7 @@ export class Process implements Disposable {
 
   #write(addr: number | bigint, type: string, v: number | bigint): boolean {
     this.assertOpen()
+    checkAddr(addr)
     const ok = native.writeValue(this.#handle, Number(addr), type, v)
     if (!ok) throw new WriteError(addr)
     return ok
@@ -301,32 +348,42 @@ export class Process implements Disposable {
    */
   alloc(size: number, protection: number = Protection.PAGE_EXECUTE_READWRITE, nearAddress?: number | bigint): bigint {
     this.assertOpen()
+    checkNumber(size, 'size')
+    checkNumber(protection, 'protection')
+    if (nearAddress !== undefined) checkAddr(nearAddress, 'nearAddress')
     return native.allocMemory(this.#handle, size, protection, nearAddress === undefined ? undefined : Number(nearAddress))
   }
   /** Free remote memory allocated with {@link alloc}. */
   free(addr: number | bigint): boolean {
     this.assertOpen()
+    checkAddr(addr)
     return native.freeMemory(this.#handle, Number(addr))
   }
   /** Change page protection. Returns previous protection. */
   protect(addr: number | bigint, size: number, protection: number): number {
     this.assertOpen()
+    checkAddr(addr)
+    checkNumber(size, 'size')
+    checkNumber(protection, 'protection')
     return native.protectMemory(this.#handle, Number(addr), size, protection)
   }
 
   /** Write bytes that may live in a protected/code region: protect→write→restore→flush. */
   writeProtected(addr: number | bigint, data: Buffer | Uint8Array): boolean {
     this.assertOpen()
-    const region = this.regions().find(r => {
-      const a = BigInt(r.baseAddress), s = BigInt(r.size), t = BigInt(addr)
-      return t >= a && t < a + s
-    })
     const old = this.protect(addr, data.length, Protection.PAGE_EXECUTE_READWRITE)
     try {
       return this.writeBuffer(addr, data)
     } finally {
-      this.protect(addr, data.length, old ?? Protection.PAGE_EXECUTE_READ)
-      native.flushInstructions(this.#handle, Number(addr), data.length)
+      // Best-effort restore: a failure here must not mask the write's real
+      // result. If it does fail the region stays RWX — warn so a weakening
+      // doesn't pass silently.
+      try {
+        this.protect(addr, data.length, old)
+        native.flushInstructions(this.#handle, Number(addr), data.length)
+      } catch (e: any) {
+        console.warn(`memoryprocess: failed to restore protection at 0x${BigInt(addr).toString(16)} — region left RWX:`, e?.message ?? e)
+      }
     }
   }
   /** NOP `len` bytes at `addr` (0x90). */
@@ -360,6 +417,8 @@ export class Process implements Disposable {
    */
   disassemble(addr: number | bigint, count: number): { address: bigint; size: number; bytes: Buffer }[] {
     this.assertOpen()
+    checkAddr(addr)
+    checkNumber(count, 'count')
     const base = BigInt(addr)
     const raw = native.readBuffer(this.#handle, Number(addr), Math.min(count * 16, 4096))
     const insns = native.disasmInstructions(this.#handle, Number(addr), count)
@@ -378,6 +437,8 @@ export class Process implements Disposable {
    */
   hook(src: number | bigint, dst: number | bigint): HookHandle {
     this.assertOpen()
+    checkAddr(src, 'src')
+    checkAddr(dst, 'dst')
     const s = BigInt(src), d = BigInt(dst)
     const insns = this.disassemble(s, 16)
     let stolenLen = 0
@@ -393,20 +454,27 @@ export class Process implements Disposable {
     // window; if the window is exhausted this throws rather than silently
     // writing a truncated rel32.
     const stub = this.#allocNear(s, stolenLen + 5, Protection.PAGE_EXECUTE_READWRITE)
-    const back = Buffer.alloc(stolenLen + 5)
-    stolen.copy(back, 0)
-    back[stolenLen] = 0xe9
-    const relBack = (s + BigInt(stolenLen)) - (stub + BigInt(stolenLen) + 5n)
-    checkRel32(relBack)
-    back.writeInt32LE(Number(relBack), stolenLen + 1)
-    this.writeBuffer(stub, back)
+    try {
+      const back = Buffer.alloc(stolenLen + 5)
+      stolen.copy(back, 0)
+      back[stolenLen] = 0xe9
+      const relBack = (s + BigInt(stolenLen)) - (stub + BigInt(stolenLen) + 5n)
+      checkRel32(relBack)
+      back.writeInt32LE(Number(relBack), stolenLen + 1)
+      this.writeBuffer(stub, back)
 
-    const patch = Buffer.alloc(stolenLen, 0xcc)
-    patch[0] = 0xe9
-    const relDst = d - (s + 5n)
-    checkRel32(relDst)
-    patch.writeInt32LE(Number(relDst), 1)
-    this.writeProtected(s, patch)
+      const patch = Buffer.alloc(stolenLen, 0xcc)
+      patch[0] = 0xe9
+      const relDst = d - (s + 5n)
+      checkRel32(relDst)
+      patch.writeInt32LE(Number(relDst), 1)
+      this.writeProtected(s, patch)
+    } catch (e) {
+      // Don't orphan an RWX page in the victim when the patch fails — free the
+      // stub (best effort) and rethrow the original error.
+      try { this.free(stub) } catch { /* victim may be gone */ }
+      throw e
+    }
 
     return { src: s, dst: d, stub, stolen }
   }
@@ -495,9 +563,9 @@ export class Process implements Disposable {
    */
   get mainThread(): number | null { this.assertOpen(); return this.threads()[0] ?? null }
   /** Suspend a thread by id. */
-  suspendThread(tid: number): boolean { return native.suspendThread(tid) }
+  suspendThread(tid: number): boolean { this.assertOpen(); checkNumber(tid, 'tid'); return native.suspendThread(tid) }
   /** Resume a thread by id. */
-  resumeThread(tid: number): boolean { return native.resumeThread(tid) }
+  resumeThread(tid: number): boolean { this.assertOpen(); checkNumber(tid, 'tid'); return native.resumeThread(tid) }
   /** Suspend all threads of this process (for atomic patching). */
   suspendAll(): number[] { const t = this.threads(); t.forEach(id => this.suspendThread(id)); return t }
   /** Resume all threads of this process. */
@@ -507,9 +575,9 @@ export class Process implements Disposable {
    * {@link suspendAll} which races with new-thread creation. Pair with
    * {@link resumeProcess}.
    */
-  suspendProcess(): boolean { return native.suspendProcess(this.pid) }
+  suspendProcess(): boolean { this.assertOpen(); return native.suspendProcess(this.pid) }
   /** Resume a process suspended by {@link suspendProcess}. */
-  resumeProcess(): boolean { return native.resumeProcess(this.pid) }
+  resumeProcess(): boolean { this.assertOpen(); return native.resumeProcess(this.pid) }
   /**
    * Wait for the process to exit. Resolves the exit code, or null on timeout.
    * Pass no timeoutMs to wait indefinitely.
@@ -534,6 +602,7 @@ export class Process implements Disposable {
    */
   queryAddress(addr: number | bigint): (Region & { allocationBase: number; state: number }) | null {
     this.assertOpen()
+    checkAddr(addr)
     return native.queryAddress(this.#handle, Number(addr))
   }
 
@@ -544,6 +613,7 @@ export class Process implements Disposable {
    */
   getThreadContext(tid: number): ThreadContext | null {
     this.assertOpen()
+    checkNumber(tid, 'tid')
     return native.getThreadContext(tid)
   }
 
@@ -554,6 +624,8 @@ export class Process implements Disposable {
    */
   setThreadContext(tid: number, ctx: Partial<Record<keyof ThreadContext, number | bigint>>): boolean {
     this.assertOpen()
+    checkNumber(tid, 'tid')
+    if (ctx === null || typeof ctx !== 'object') throw new TypeError('ctx must be an object')
     return native.setThreadContext(tid, ctx)
   }
 
@@ -564,6 +636,7 @@ export class Process implements Disposable {
    */
   callRemote(fnAddr: bigint | number, param = 0, timeoutMs = 10000): number | null {
     this.assertOpen()
+    checkAddr(fnAddr, 'fnAddr')
     return native.callRemote(this.pid, fnAddr, param, timeoutMs)
   }
 
@@ -577,6 +650,10 @@ export class Process implements Disposable {
    */
   hwBreakpoint(tid: number, addr: bigint | number, slot: 0 | 1 | 2 | 3, size: 1 | 2 | 4 | 8 = 1): boolean {
     this.assertOpen()
+    if (!Number.isInteger(slot) || slot < 0 || slot > 3)
+      throw new RangeError('slot must be 0..3')
+    if (size !== 1 && size !== 2 && size !== 4 && size !== 8)
+      throw new RangeError('size must be 1|2|4|8')
     const ctx = this.getThreadContext(tid)
     if (!ctx) return false
     // Intel Dr7 LEN encoding: 00=1 byte, 01=2, 11=4, 10=8
@@ -594,6 +671,8 @@ export class Process implements Disposable {
   /** Clear Dr{slot} (address + enable/RW/LEN bits in Dr7) on thread `tid`. */
   clearHwBreakpoint(tid: number, slot: 0 | 1 | 2 | 3): boolean {
     this.assertOpen()
+    if (!Number.isInteger(slot) || slot < 0 || slot > 3)
+      throw new RangeError('slot must be 0..3')
     const ctx = this.getThreadContext(tid)
     if (!ctx) return false
     const shift = BigInt(16 + slot * 4)
@@ -615,6 +694,7 @@ export class Process implements Disposable {
    */
   findCodeCave(minLen: number, opts: { module?: string; start?: number | bigint; end?: number | bigint } = {}): bigint | null {
     this.assertOpen()
+    if (!Number.isFinite(minLen) || minLen < 1) return null
     const EXEC = Protection.PAGE_EXECUTE | Protection.PAGE_EXECUTE_READ |
       Protection.PAGE_EXECUTE_READWRITE | Protection.PAGE_EXECUTE_WRITECOPY
     const MEM_COMMIT = 0x1000
@@ -772,12 +852,14 @@ export class Process implements Disposable {
   // ---- pattern scan (async) ----
   async scan(pattern: string, opts: ScanOptions = {}): Promise<bigint[]> {
     this.assertOpen()
+    checkStr(pattern, 'pattern')
     let start = toNum(opts.start)
     let end = toNum(opts.end)
     if (opts.module) {
       const m = this.module(opts.module)
-      if (m) { start = m.base; end = m.base + m.size }
-      if (opts.section && m) {
+      if (!m) return [] // module not loaded — never silently scan all of VA
+      start = m.base; end = m.base + m.size
+      if (opts.section) {
         const sec = this.#sectionRange(BigInt(m.base), opts.section)
         if (!sec) return [] // module has no such section
         start = sec[0]; end = sec[1]
@@ -825,12 +907,14 @@ export class Process implements Disposable {
   async scanValue(value: number | bigint, opts: ScanValueOptions = {}): Promise<bigint[]> {
     this.assertOpen()
     const type = opts.type ?? 'int32'
+    if (!VALID_SCAN_TYPES.includes(type)) throw new TypeError(`invalid scanValue type ${type} — use one of ${VALID_SCAN_TYPES.join('/')}`)
     const needle = encodeValue(type, value)
     let start = toNum(opts.start)
     let end = toNum(opts.end)
     if (opts.module) {
       const m = this.module(opts.module)
-      if (m) { start = m.base; end = m.base + m.size }
+      if (!m) return [] // module not loaded — never silently scan all of VA
+      start = m.base; end = m.base + m.size
     }
     return native.scanValue(this.pid, needle, {
       start, end,
@@ -849,6 +933,7 @@ export class Process implements Disposable {
     this.assertOpen()
     if (hits.length === 0) return []
     const type = opts.type ?? 'int32'
+    if (!VALID_SCAN_TYPES.includes(type)) throw new TypeError(`invalid nextScan type ${type} — use one of ${VALID_SCAN_TYPES.join('/')}`)
     const width = VALUE_WIDTHS[type]
     const PAGE = 0x1000n
 
@@ -862,12 +947,14 @@ export class Process implements Disposable {
       g.push({ hit: BigInt(h), off })
     }
 
+    const isFloat = type === 'float' || type === 'double'
     const matches = (v: number | bigint): boolean => {
       if (opts.range) {
         const [lo, hi] = opts.range
+        if (isFloat) return Number(v) >= Number(lo) && Number(v) <= Number(hi)
         return BigInt(v) >= BigInt(lo) && BigInt(v) <= BigInt(hi)
       }
-      if (type === 'float' || type === 'double')
+      if (isFloat)
         return Math.abs(Number(v) - Number(value)) < 1e-6
       return BigInt(v) === BigInt(value)
     }
@@ -879,7 +966,9 @@ export class Process implements Disposable {
       const slice = pages.slice(i, i + BATCH)
       const bufs = await Promise.all(slice.map(([page]) =>
         Promise.resolve().then(() => {
-          try { return this.readSafe(page * PAGE, 0x1000) } catch { return null }
+          // Overlap the page read by `width` bytes so a value straddling the
+          // page boundary (possible with alignment:1) is still re-checked.
+          try { return this.readSafe(page * PAGE, 0x1000 + width) } catch { return null }
         })
       ))
       for (let j = 0; j < slice.length; j++) {
@@ -905,14 +994,19 @@ export class Process implements Disposable {
    */
   freeze(addr: number | bigint, type: ScanValueType, value: number | bigint, intervalMs = 50): () => void {
     this.assertOpen()
+    checkAddr(addr)
+    if (!(type in VALUE_WIDTHS)) throw new TypeError(`unknown type ${type}`)
+    const stop = () => { clearInterval(timer); this.#timers.delete(timer) }
     const timer = setInterval(() => {
+      if (!this.#handle) { stop(); return } // self-clear after close()
       try {
         native.writeValue(this.#handle, Number(addr), type,
           (type === 'int64' || type === 'uint64') ? BigInt(value) : value)
       } catch { /* closed or unwritable — ignore */ }
     }, intervalMs)
     if (typeof timer.unref === 'function') timer.unref()
-    return () => clearInterval(timer)
+    this.#timers.add(timer)
+    return stop
   }
 
   /** First match for `pattern`, or null when nothing matches. */
@@ -936,6 +1030,7 @@ export class Process implements Disposable {
    */
   injectDll(absolutePath: string): boolean {
     this.assertOpen()
+    checkStr(absolutePath, 'dllPath')
     try { return native.injectDll(this.pid, absolutePath) }
     catch (e: any) { throw new InjectError(e?.message ?? 'unknown', e?.win32code) }
   }
@@ -973,21 +1068,30 @@ export class Process implements Disposable {
     this.assertOpen()
     let prev: number | undefined
     try { prev = this.readInt32(addr) } catch { /* start uninitialized */ }
+    const stop = () => { clearInterval(timer); this.#timers.delete(timer) }
     const timer = setInterval(() => {
+      if (!this.#handle) { stop(); return } // self-clear after close()
       let cur: number
       try { cur = this.readInt32(addr) } catch { return }
       if (prev === undefined || cur !== prev) {
         const old = prev
         prev = cur
-        if (old !== undefined) cb(cur, old)
+        if (old !== undefined) {
+          // Swallow callback exceptions — a throwing user cb inside a
+          // setInterval must not crash the process or spam unhandled errors.
+          try { cb(cur, old) } catch { /* user callback fault */ }
+        }
       }
     }, intervalMs)
     if (typeof timer.unref === 'function') timer.unref()
-    return () => clearInterval(timer)
+    this.#timers.add(timer)
+    return stop
   }
 
-  /** Close the process handle. Idempotent. */
+  /** Close the process handle. Idempotent; also stops freeze()/watch() timers. */
   close(): void {
+    for (const t of this.#timers) clearInterval(t)
+    this.#timers.clear()
     if (this.#handle) {
       native.closeHandle(this.#handle)
       this.#handle = 0

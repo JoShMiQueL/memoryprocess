@@ -139,7 +139,25 @@ private:
       if (!ReadProcessMemory(proc_, reinterpret_cast<LPCVOID>(pos),
                              chunk.data(), toRead, &got) || got == 0) {
         tail.clear(); // VA discontinuity: a match can't straddle a failed read
-        pos += toRead;
+        // Don't blindly skip the whole 64KB chunk — a single inaccessible
+        // page inside a readable region would drop signatures CE finds.
+        // Re-query the sub-region at `pos`: skip only up to its end, or just
+        // one 4KB page when the sub-region still claims to be readable (the
+        // failure was a commit/protection race beyond the first page).
+        MEMORY_BASIC_INFORMATION smbi{};
+        std::uintptr_t next = pos + toRead;
+        if (VirtualQueryEx(proc_, reinterpret_cast<LPCVOID>(pos), &smbi, sizeof(smbi))) {
+          const std::uintptr_t sEnd =
+              reinterpret_cast<std::uintptr_t>(smbi.BaseAddress) + smbi.RegionSize;
+          const bool subOk = valueMode_
+              ? (onlyWritable_ ? RegionWritable(smbi) : RegionReadable(smbi))
+              : (onlyReadable_ ? RegionReadable(smbi)
+                               : ((smbi.State == MEM_COMMIT) &&
+                                  !(smbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))));
+          next = subOk ? pos + 0x1000 : (sEnd > pos ? sEnd : pos + 0x1000);
+        }
+        if (next <= pos) next = pos + toRead; // never stall the walk
+        pos = next > hi ? hi : next;
         continue;
       }
       chunk.resize(got);
