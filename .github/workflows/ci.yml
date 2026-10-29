@@ -127,10 +127,17 @@ jobs:
           $tgz = npm pack --pack-destination "$env:RUNNER_TEMP" | Select-Object -Last 1
           echo "TGZ=$env:RUNNER_TEMP\$tgz" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Install tarball in clean dir + smoke
+      - name: Install tarball in clean dir + smoke (node)
         run: |
           New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\consumer" | Out-Null
           Set-Location "$env:RUNNER_TEMP\consumer"
           npm init -y | Out-Null
           npm install "$env:TGZ" | Out-Null
           node --input-type=module -e "import { Process } from 'memoryprocess'; const p = Process.list(); if (!p.length) throw new Error('list empty'); console.log('OK', p.length, 'processes')"
+
+      # The package must load as a Bun consumer too — the .node is N-API and
+      # loads the same way, but this is the real-user check on the tarball.
+      - name: Smoke as Bun consumer
+        run: |
+          Set-Location "$env:RUNNER_TEMP\consumer"
+          bun -e "import { Process } from 'memoryprocess'; const p = Process.list(); if (!p.length) throw new Error('list empty'); console.log('Bun OK', p.length, 'processes')"
