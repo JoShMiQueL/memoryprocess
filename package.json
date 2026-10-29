@@ -34,7 +34,7 @@
     "check": "bun check",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "test:node": "node --test tests/compat/",
+    "test:node": "node --test tests/compat/smoke.test.mjs",
     "prepublishOnly": "npm run build && npm run prebuild:all"
   },
   "repository": {

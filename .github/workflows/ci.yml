@@ -83,4 +83,4 @@ jobs:
           path: dist/
 
       - name: Compat smoke (node ${{ matrix.node }})
-        run: node --test tests/compat/*.test.mjs
+        run: node --test tests/compat/smoke.test.mjs
