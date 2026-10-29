@@ -780,6 +780,34 @@ export class Process implements Disposable {
     checkAddr(dst, 'dst');
     const s = BigInt(src),
       d = BigInt(dst);
+
+    // Mid-instruction guard: backward-disassemble the 16 bytes before `src`.
+    // If any decoded instruction's end runs PAST `src`, the caller hooked
+    // into the middle of a real instruction — the trampoline would steal a
+    // truncated opcode and diverge from the original control flow. (Best-
+    // effort: code that doesn't disassemble cleanly backward, or a `src` at
+    // a function start with <16B before it, skips the check.)
+    try {
+      const win = 16;
+      const back = this.disassemble(s - BigInt(win), 16);
+      for (const i of back) {
+        const end = i.address + BigInt(i.size);
+        if (end > s) {
+          const err = new Error(
+            `hook: src 0x${s.toString(16)} is mid-instruction — an instruction ` +
+              `at 0x${i.address.toString(16)} spans it (ends 0x${end.toString(16)}). ` +
+              `Hook an aligned entry point.`,
+          ) as Error & { code?: string };
+          err.code = 'HOOK_MISALIGNED';
+          throw err;
+        }
+      }
+    } catch (e: any) {
+      if (e?.code === 'HOOK_MISALIGNED') throw e;
+      // back-window unreadable/undecodable → can't verify; proceed (the
+      // forward hookSteal will still refuse undecodable bytes at src).
+    }
+
     if (this.#hookedSrcs.has(s)) {
       const err = new Error(
         `hook: src 0x${s.toString(16)} is already hooked by this Process — ` +
@@ -1731,11 +1759,16 @@ export class Process implements Disposable {
       const slice = pages.slice(i, i + BATCH);
       const bufs = await Promise.all(
         slice.map(([page]) =>
-          Promise.resolve().then(() => {
+          Promise.resolve().then(async () => {
             // Overlap the page read by `width` bytes so a value straddling the
             // page boundary (possible with alignment:1) is still re-checked.
+            // Also capture the readable region's end — a hit whose span
+            // crosses the region boundary decodes zero-fill as a false value.
             try {
-              return this.readSafe(page * PAGE, 0x1000 + width);
+              const q = this.queryAddress(page * PAGE);
+              const buf = this.readSafe(page * PAGE, 0x1000 + width);
+              const regionEnd = q ? BigInt(q.baseAddress) + BigInt(q.size) : 0n;
+              return { buf, regionEnd };
             } catch {
               return null;
             }
@@ -1743,10 +1776,27 @@ export class Process implements Disposable {
         ),
       );
       for (let j = 0; j < slice.length; j++) {
-        const buf = bufs[j];
-        if (!buf) continue;
+        const entry = bufs[j];
+        if (!entry) continue;
+        const { buf, regionEnd } = entry;
+        const pageBase = slice[j]![0] * PAGE;
         for (const { hit, prev, off } of slice[j]![1]) {
           if (off + width > buf.length) continue;
+          // region-boundary straddle: tail would decode zero-fill as a false
+          // value — verify the last byte lives in a readable region.
+          if (pageBase + BigInt(off + width) > regionEnd) {
+            const qe = this.queryAddress(pageBase + BigInt(off + width - 1));
+            if (
+              !qe ||
+              qe.state !== 0x1000 || // MEM_COMMIT
+              (qe.protection & (0x01 | 0x100)) !== 0 || // NOACCESS|GUARD
+              (qe.protection &
+                0xff &
+                (0x02 | 0x04 | 0x08 | 0x20 | 0x40 | 0x80)) ===
+                0
+            )
+              continue;
+          }
           try {
             const cur = decodeValue(buf, off, type);
             if (matches(cur, prev)) out.push({ addr: hit, value: cur });

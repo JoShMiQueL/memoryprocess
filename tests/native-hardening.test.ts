@@ -340,6 +340,29 @@ describe('C2 hookSteal position-relative handling', () => {
     proc.free(a);
     proc.free(stub);
   });
+
+  test('hook(f+1 mid-instruction) → HOOK_MISALIGNED (backward disasm catches it)', () => {
+    const PAGE = Protection.PAGE_EXECUTE_READWRITE;
+    const page = proc.alloc(0x400, PAGE);
+    try {
+      // fn mid-page so the 16-byte back-window is readable. Prefix it with
+      // 16 nops so backward disasm lands cleanly on fn as a real boundary,
+      // then `mov eax,42` (5B) at fn ends at fn+5 — hooking fn+1 is inside
+      // its imm32. dst: valid code elsewhere in the page.
+      const fn = page + 0x200n;
+      const dst = page + 0x100n;
+      proc.writeBuffer(fn - 16n, Buffer.alloc(16, 0x90));
+      proc.writeBuffer(fn, Buffer.from([0xb8, 0x2a, 0, 0, 0, 0xc3]));
+      const r = probe(() => proc.hook(fn + 1n, dst));
+      expect(r.threw).toBe(true);
+      expect((r.err as any)?.code).toBe('HOOK_MISALIGNED');
+      // Aligned control: hooking fn itself still works.
+      const h = proc.hook(fn, dst);
+      proc.unhook(h);
+    } finally {
+      proc.free(page);
+    }
+  });
 });
 
 /* ================= C4 — ejectDll result + WoW64 ================= */

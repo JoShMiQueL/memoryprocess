@@ -1079,21 +1079,24 @@ export function readMany(
     } catch {
       continue;
     }
+    // The readable region containing page start ends at regionEnd — a request
+    // whose span crosses it reads zero-fill for its tail (regions are
+    // page-granular but can END mid-4KB-page if a smaller region is followed
+    // by unmapped/NOACCESS space).
+    const regionEnd = BigInt(q.baseAddress) + BigInt(q.size);
     for (const { idx, off, type, width } of list) {
       if (off + width > buf.length) continue;
-      // A request straddling into the NEXT page decodes readSafe's zero-fill
-      // as a real 0 — check the neighbour page is actually readable before
-      // trusting the tail bytes (the +8 read is always in-page, but a request
-      // AT offset 0xFFC+width>0x1000 reads into page+1's zero-fill).
-      if (off + width > 0x1000) {
-        const nq = proc.queryAddress(page * PAGE + PAGE);
+      const reqEnd = page * PAGE + BigInt(off + width);
+      if (reqEnd > regionEnd) {
+        // crosses the region boundary — tail must live in a readable region too
+        const qe = proc.queryAddress(reqEnd - 1n);
         if (
-          !nq ||
-          nq.state !== MEM_COMMIT ||
-          (nq.protection & UNREADABLE) !== 0 ||
-          (nq.protection & 0xff & readableMask) === 0
+          !qe ||
+          qe.state !== MEM_COMMIT ||
+          (qe.protection & UNREADABLE) !== 0 ||
+          (qe.protection & 0xff & readableMask) === 0
         )
-          continue; // straddle page unreadable → null, not a false zero
+          continue; // straddle into unreadable region → null, not a false 0
       }
       try {
         out[idx] =
