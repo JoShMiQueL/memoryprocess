@@ -15,8 +15,9 @@ interface Native {
   writeValue(handle: number, address: number, type: string, value: number | bigint): boolean
   readBuffer(handle: number, address: number, size: number): Buffer
   writeBuffer(handle: number, address: number, data: Buffer): boolean
-  scan(handle: number, pattern: string, opts?: { start?: number; end?: number; onlyReadable?: boolean }): Promise<bigint[]>
-  allocMemory(handle: number, size: number, protection: number): bigint
+  scan(pid: number, pattern: string, opts?: { start?: number; end?: number; onlyReadable?: boolean }): Promise<bigint[]>
+  scanValue(pid: number, needle: Uint8Array, opts?: { start?: number; end?: number; onlyWritable?: boolean; alignment?: number }): Promise<bigint[]>
+  allocMemory(handle: number, size: number, protection: number, nearAddress?: number): bigint
   freeMemory(handle: number, address: number): boolean
   protectMemory(handle: number, address: number, size: number, protection: number): number
   isWow64(handle: number): boolean
@@ -39,6 +40,10 @@ interface Native {
   setThreadContext(tid: number, ctx: Partial<Record<'rip' | 'rsp' | 'rbp' | 'dr0' | 'dr1' | 'dr2' | 'dr3' | 'dr7' | 'eflags', number | bigint>>): boolean
   callRemote(pid: number, fnAddress: number | bigint, param: number | bigint, timeoutMs?: number): number | null
   disasmInstructions(handle: number, address: number, count: number): { offset: number; length: number }[]
+  suspendProcess(pid: number): boolean
+  resumeProcess(pid: number): boolean
+  enableDebugPrivilege(): boolean
+  waitForExit(pid: number, timeoutMs?: number): Promise<number | null>
 }
 
 // Resolution order: dist/memoryprocess.node (built/packaged) -> prebuilds via

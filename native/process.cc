@@ -51,24 +51,32 @@ std::vector<ProcInfo> ListProcesses() {
   return out;
 }
 
-std::vector<ModuleInfo> GetModules(HANDLE proc, DWORD /*pid*/) {
+static std::string WideToUtf8(const wchar_t* w) {
+  if (!w || !*w) return {};
+  int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
+  if (n <= 1) return {};
+  std::string s(static_cast<size_t>(n) - 1, '\0');
+  WideCharToMultiByte(CP_UTF8, 0, w, -1, s.data(), n, nullptr, nullptr);
+  return s;
+}
+
+std::vector<ModuleInfo> GetModules(HANDLE /*proc*/, DWORD pid) {
+  // Toolhelp snapshot — unlike EnumProcessModulesEx this lists BOTH 64-bit and
+  // 32-bit (WoW64) modules from a 64-bit reader, has no fixed-cap buffer, and
+  // hands us base+size+path in one shot.
   std::vector<ModuleInfo> out;
-  HMODULE mods[1024];
-  DWORD needed = 0;
-  if (!EnumProcessModulesEx(proc, mods, sizeof(mods), &needed, LIST_MODULES_ALL)) return out;
-  DWORD count = needed / sizeof(HMODULE);
-  for (DWORD i = 0; i < count; i++) {
-    MODULEINFO mi{};
-    if (!GetModuleInformation(proc, mods[i], &mi, sizeof(mi))) continue;
-    wchar_t path[MAX_PATH];
-    if (!GetModuleFileNameExW(proc, mods[i], path, MAX_PATH)) continue;
-    char utf8[MAX_PATH * 2];
-    size_t n = 0;
-    wcstombs_s(&n, utf8, path, sizeof(utf8) - 1);
-    // base filename
-    std::string p(utf8);
-    out.push_back({ reinterpret_cast<std::uintptr_t>(mi.lpBaseOfDll), static_cast<std::uint32_t>(mi.SizeOfImage), p });
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+  if (snap == INVALID_HANDLE_VALUE) return out;
+  MODULEENTRY32W me{};
+  me.dwSize = sizeof(me);
+  if (Module32FirstW(snap, &me)) {
+    do {
+      out.push_back({ reinterpret_cast<std::uintptr_t>(me.modBaseAddr),
+                      static_cast<std::uint32_t>(me.modBaseSize),
+                      WideToUtf8(me.szExePath) });
+    } while (Module32NextW(snap, &me));
   }
+  CloseHandle(snap);
   return out;
 }
 

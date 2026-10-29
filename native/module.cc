@@ -2,11 +2,26 @@
 #include "memory.h"
 #include <system_error>
 #include <tlhelp32.h>
+#include <cmath>
 extern "C" {
 #include "hde/hde64.h"
 }
 
 namespace mp {
+
+// Max bytes a single read call may materialize — guards against negative /
+// non-finite / absurd `size` values blowing up std::vector across the N-API
+// boundary (a length_error crossing N-API aborts the process).
+static const double MAX_READ_BYTES = 512.0 * 1024.0 * 1024.0;
+
+static bool CheckSize(Napi::Env env, double size) {
+  if (!std::isfinite(size) || size < 0 || size > MAX_READ_BYTES) {
+    Napi::RangeError::New(env, "size must be a finite number between 0 and 512MB")
+        .ThrowAsJavaScriptException();
+    return false;
+  }
+  return true;
+}
 
 static Napi::Object ErrToJs(Napi::Env env, const std::system_error& e) {
   auto obj = Napi::Object::New(env);
@@ -114,7 +129,9 @@ Napi::Value ReadBufferSync(const Napi::CallbackInfo& info) {
   if (info.Length() < 3) { Napi::TypeError::New(env, "expected (handle,address,size)").ThrowAsJavaScriptException(); return env.Null(); }
   HANDLE h = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(info[0].As<Napi::Number>().DoubleValue()));
   auto addr = static_cast<std::uintptr_t>(info[1].As<Napi::Number>().DoubleValue());
-  auto size = static_cast<std::size_t>(info[2].As<Napi::Number>().DoubleValue());
+  double sizeD = info[2].As<Napi::Number>().DoubleValue();
+  if (!CheckSize(env, sizeD)) return env.Null();
+  auto size = static_cast<std::size_t>(sizeD);
   try {
     auto bytes = ReadBytes(h, addr, size);
     return Napi::Buffer<std::uint8_t>::Copy(env, bytes.data(), bytes.size());
@@ -140,13 +157,19 @@ Napi::Value WriteBufferSync(const Napi::CallbackInfo& info) {
 
 // ---------- v2 Tier-1/2 ----------
 
+// allocMemory(handle, size, protection[, nearAddress]) -> bigint
+// `nearAddress` is passed to VirtualAllocEx as lpAddress — a hint used to land
+// trampoline stubs within rel32 range (±2GB) of a hook site.
 Napi::Value AllocMemorySync(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
-  if (info.Length() < 3) { Napi::TypeError::New(env, "expected (handle,size,protection)").ThrowAsJavaScriptException(); return env.Null(); }
+  if (info.Length() < 3) { Napi::TypeError::New(env, "expected (handle,size,protection[,nearAddress])").ThrowAsJavaScriptException(); return env.Null(); }
   HANDLE h = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(info[0].As<Napi::Number>().DoubleValue()));
   auto size = static_cast<SIZE_T>(info[1].As<Napi::Number>().DoubleValue());
   DWORD prot = info[2].As<Napi::Number>().Uint32Value();
-  LPVOID p = VirtualAllocEx(h, nullptr, size, MEM_COMMIT | MEM_RESERVE, prot);
+  LPVOID hint = nullptr;
+  if (info.Length() > 3 && info[3].IsNumber())
+    hint = reinterpret_cast<LPVOID>(static_cast<std::uintptr_t>(info[3].As<Napi::Number>().DoubleValue()));
+  LPVOID p = VirtualAllocEx(h, hint, size, MEM_COMMIT | MEM_RESERVE, prot);
   if (!p) { auto e = Napi::Error::New(env, "VirtualAllocEx failed"); e.Set("code", "ALLOC_FAILED"); e.Set("win32code", Napi::Number::New(env, (double)GetLastError())); e.ThrowAsJavaScriptException(); return env.Null(); }
   return Napi::BigInt::New(env, reinterpret_cast<std::uint64_t>(p));
 }
@@ -283,7 +306,9 @@ Napi::Value ReadSafeSync(const Napi::CallbackInfo& info) {
   if (info.Length() < 3) { Napi::TypeError::New(env, "expected (handle,address,size)").ThrowAsJavaScriptException(); return env.Null(); }
   HANDLE h = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(info[0].As<Napi::Number>().DoubleValue()));
   auto addr = static_cast<std::uintptr_t>(info[1].As<Napi::Number>().DoubleValue());
-  auto size = static_cast<std::size_t>(info[2].As<Napi::Number>().DoubleValue());
+  double sizeD = info[2].As<Napi::Number>().DoubleValue();
+  if (!CheckSize(env, sizeD)) return env.Null();
+  auto size = static_cast<std::size_t>(sizeD);
 
   std::vector<std::uint8_t> out(size, 0);
   const std::uintptr_t end = addr + size;
@@ -359,6 +384,19 @@ Napi::Value InjectDllSync(const Napi::CallbackInfo& info) {
   HANDLE h = OpenProcess(access, FALSE, pid);
   if (!h) { ThrowInject(env, "OpenProcess failed", GetLastError()); return env.Null(); }
 
+  // WoW64 targets load a 32-bit kernel32 at a different base — LoadLibraryA
+  // resolved in *our* (x64) process would be the wrong address. Refuse rather
+  // than silently corrupting the target.
+  {
+    BOOL wow = FALSE;
+    IsWow64Process(h, &wow);
+    if (wow) {
+      CloseHandle(h);
+      ThrowInject(env, "injectDll does not support WoW64 (32-bit) targets", ERROR_NOT_SUPPORTED);
+      return env.Null();
+    }
+  }
+
   bool ok = false;
   do {
     LPVOID remote = VirtualAllocEx(h, nullptr, path.size() + 1,
@@ -370,6 +408,9 @@ Napi::Value InjectDllSync(const Napi::CallbackInfo& info) {
       VirtualFreeEx(h, remote, 0, MEM_RELEASE);
       ThrowInject(env, "WriteProcessMemory failed", e); break;
     }
+    // NOTE: kernel32 is loaded at the same base in every x64 process, so this
+    // locally-resolved LoadLibraryA address is valid in the target. This holds
+    // because kernel32 is a KnownDll mapped at a shared ASLR base.
     HMODULE k32 = GetModuleHandleA("kernel32.dll");
     FARPROC loadLib = k32 ? GetProcAddress(k32, "LoadLibraryA") : nullptr;
     if (!loadLib) {
@@ -384,9 +425,26 @@ Napi::Value InjectDllSync(const Napi::CallbackInfo& info) {
       VirtualFreeEx(h, remote, 0, MEM_RELEASE);
       ThrowInject(env, "CreateRemoteThread failed", e); break;
     }
-    WaitForSingleObject(t, 10000);
+    DWORD wr = WaitForSingleObject(t, 10000);
+    if (wr != WAIT_OBJECT_0) {
+      // Thread still running (or failed): terminate it before freeing `remote`
+      // so it can't read freed memory mid-LoadLibrary.
+      TerminateThread(t, 0);
+      CloseHandle(t);
+      VirtualFreeEx(h, remote, 0, MEM_RELEASE);
+      ThrowInject(env, "LoadLibraryA remote thread timed out", wr == WAIT_FAILED ? GetLastError() : ERROR_TIMEOUT);
+      break;
+    }
+    DWORD exitCode = 0;
+    GetExitCodeThread(t, &exitCode);
     CloseHandle(t);
     VirtualFreeEx(h, remote, 0, MEM_RELEASE);
+    // LoadLibraryA returns the module HMODULE as the thread exit code; 0 means
+    // the DLL failed to load (not found, bad bitness, missing dependency).
+    if (exitCode == 0) {
+      ThrowInject(env, "LoadLibraryA returned NULL in target", ERROR_MOD_NOT_FOUND);
+      break;
+    }
     ok = true;
   } while (0);
   CloseHandle(h);
@@ -417,7 +475,13 @@ Napi::Value EjectDllSync(const Napi::CallbackInfo& info) {
         reinterpret_cast<LPTHREAD_START_ROUTINE>(freeLib),
         reinterpret_cast<LPVOID>(base), 0, nullptr);
     if (!t) { ThrowInject(env, "CreateRemoteThread failed", GetLastError()); break; }
-    WaitForSingleObject(t, 10000);
+    DWORD wr = WaitForSingleObject(t, 10000);
+    if (wr != WAIT_OBJECT_0) {
+      TerminateThread(t, 0);
+      CloseHandle(t);
+      ThrowInject(env, "FreeLibrary remote thread timed out", wr == WAIT_FAILED ? GetLastError() : ERROR_TIMEOUT);
+      break;
+    }
     CloseHandle(t);
     ok = true;
   } while (0);
@@ -523,9 +587,7 @@ Napi::Value SetThreadContextSync(const Napi::CallbackInfo& info) {
   set("dr2", *reinterpret_cast<std::uint64_t*>(&ctx.Dr2));
   set("dr3", *reinterpret_cast<std::uint64_t*>(&ctx.Dr3));
   set("dr7", *reinterpret_cast<std::uint64_t*>(&ctx.Dr7));
-  std::uint64_t efl = ctx.EFlags;
   if (patch.Has("eflags") && JsToU64(patch.Get("eflags"), v)) ctx.EFlags = static_cast<DWORD>(v);
-  (void)efl;
 
   HANDLE t = OpenThread(THREAD_SET_CONTEXT, FALSE, tid);
   if (!t) {
@@ -563,7 +625,11 @@ Napi::Value CallRemoteSync(const Napi::CallbackInfo& info) {
   if (!t) { CloseHandle(h); return env.Null(); }
   DWORD wr = WaitForSingleObject(t, timeout);
   DWORD code = 0;
-  bool ok = (wr == WAIT_OBJECT_0) && GetExitCodeThread(t, &code);
+  // On timeout the remote thread is terminated before we return null, so the
+  // caller can safely free any memory the thread was executing in
+  // (execShellcode relies on this).
+  if (wr != WAIT_OBJECT_0) { TerminateThread(t, 0); CloseHandle(t); CloseHandle(h); return env.Null(); }
+  bool ok = GetExitCodeThread(t, &code) != 0;
   CloseHandle(t);
   CloseHandle(h);
   if (!ok) return env.Null();
@@ -615,6 +681,107 @@ Napi::Value DisasmInstructionsSync(const Napi::CallbackInfo& info) {
     n++;
   }
   return arr;
+}
+
+// ---------- v2.1 additions ----------
+
+// suspendProcess(pid) / resumeProcess(pid) via undocumented-but-stable
+// NtSuspendProcess / NtResumeProcess exported by ntdll. Atomic whole-process
+// suspend — strictly better than per-thread suspendAll (no TOCTOU where a
+// new thread spawns mid-enumeration).
+static Napi::Value NtSuspendResume(const Napi::CallbackInfo& info, bool suspend) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 1 || !info[0].IsNumber()) {
+    Napi::TypeError::New(env, "expected (pid)").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+  DWORD pid = info[0].As<Napi::Number>().Uint32Value();
+  HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+  if (!ntdll) return Napi::Boolean::New(env, false);
+  using NtProcFn = LONG (NTAPI*)(HANDLE);
+  FARPROC fp = GetProcAddress(ntdll, suspend ? "NtSuspendProcess" : "NtResumeProcess");
+  if (!fp) return Napi::Boolean::New(env, false);
+  HANDLE h = OpenProcess(PROCESS_SUSPEND_RESUME, FALSE, pid);
+  if (!h) return Napi::Boolean::New(env, false);
+  LONG status = reinterpret_cast<NtProcFn>(fp)(h);
+  CloseHandle(h);
+  return Napi::Boolean::New(env, status == 0 /* STATUS_SUCCESS */);
+}
+
+Napi::Value SuspendProcessSync(const Napi::CallbackInfo& info) { return NtSuspendResume(info, true); }
+Napi::Value ResumeProcessSync(const Napi::CallbackInfo& info) { return NtSuspendResume(info, false); }
+
+// enableDebugPrivilege() -> boolean
+// Grants the CALLING process SeDebugPrivilege so it can open
+// protected/system processes. No target handle needed.
+Napi::Value EnableDebugPrivilegeSync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  HANDLE tok = nullptr;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &tok))
+    return Napi::Boolean::New(env, false);
+  LUID luid{};
+  bool ok = LookupPrivilegeValueW(nullptr, L"SeDebugPrivilege", &luid) != 0;
+  if (ok) {
+    TOKEN_PRIVILEGES tp{};
+    tp.PrivilegeCount = 1;
+    tp.Privileges[0].Luid = luid;
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    ok = AdjustTokenPrivileges(tok, FALSE, &tp, sizeof(tp), nullptr, nullptr) != 0 &&
+         GetLastError() == ERROR_SUCCESS;
+  }
+  CloseHandle(tok);
+  return Napi::Boolean::New(env, ok);
+}
+
+// WaitForExitWorker: WaitForSingleObject on the (dup'd) process handle, then
+// GetExitCodeProcess. Resolve(exitCode) or resolve(null) on timeout.
+class WaitExitWorker : public Napi::AsyncWorker {
+public:
+  WaitExitWorker(Napi::Env env, Napi::Promise::Deferred deferred, DWORD pid, DWORD timeoutMs)
+      : Napi::AsyncWorker(env), deferred_(deferred), pid_(pid), timeout_(timeoutMs) {}
+  ~WaitExitWorker() override { if (h_) CloseHandle(h_); }
+
+  void Execute() override {
+    h_ = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid_);
+    if (!h_) { SetError("OpenProcess failed"); return; }
+    DWORD wr = WaitForSingleObject(h_, timeout_);
+    if (wr == WAIT_OBJECT_0) {
+      DWORD code = 0;
+      if (GetExitCodeProcess(h_, &code)) { exited_ = true; exitCode_ = code; }
+    }
+    // WAIT_TIMEOUT / WAIT_FAILED -> exited_ stays false -> resolve null
+  }
+  void OnOK() override {
+    if (exited_) deferred_.Resolve(Napi::Number::New(Env(), static_cast<double>(exitCode_)));
+    else deferred_.Resolve(Env().Null());
+  }
+  void OnError(const Napi::Error& e) override { deferred_.Reject(e.Value()); }
+private:
+  Napi::Promise::Deferred deferred_;
+  DWORD pid_, timeout_;
+  HANDLE h_ = nullptr;
+  bool exited_ = false;
+  DWORD exitCode_ = 0;
+};
+
+// waitForExit(pid, timeoutMs) -> Promise<exitCode | null>
+Napi::Value WaitForExitAsync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 1 || !info[0].IsNumber()) {
+    Napi::TypeError::New(env, "expected (pid[, timeoutMs])").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+  DWORD pid = info[0].As<Napi::Number>().Uint32Value();
+  DWORD timeout = INFINITE;
+  if (info.Length() > 1 && info[1].IsNumber()) {
+    double t = info[1].As<Napi::Number>().DoubleValue();
+    if (std::isfinite(t) && t >= 0 && t <= 0xFFFFFFFE) timeout = static_cast<DWORD>(t);
+  }
+  auto deferred = Napi::Promise::Deferred::New(env);
+  auto promise = deferred.Promise();
+  auto* w = new WaitExitWorker(env, std::move(deferred), pid, timeout);
+  w->Queue();
+  return promise;
 }
 
 } // namespace mp

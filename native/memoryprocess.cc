@@ -28,6 +28,11 @@ static Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("setThreadContext", Napi::Function::New(env, mp::SetThreadContextSync));
   exports.Set("callRemote", Napi::Function::New(env, mp::CallRemoteSync));
   exports.Set("disasmInstructions", Napi::Function::New(env, mp::DisasmInstructionsSync));
+  exports.Set("scanValue", Napi::Function::New(env, mp::ScanValueAsync));
+  exports.Set("suspendProcess", Napi::Function::New(env, mp::SuspendProcessSync));
+  exports.Set("resumeProcess", Napi::Function::New(env, mp::ResumeProcessSync));
+  exports.Set("enableDebugPrivilege", Napi::Function::New(env, mp::EnableDebugPrivilegeSync));
+  exports.Set("waitForExit", Napi::Function::New(env, mp::WaitForExitAsync));
   return exports;
 }
 

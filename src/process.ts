@@ -21,6 +21,11 @@ export const Protection = {
   PAGE_EXECUTE_READWRITE: 0x40,
   PAGE_EXECUTE_WRITECOPY: 0x80,
   PAGE_GUARD: 0x100,
+  // unprefixed aliases for convenience
+  READWRITE: 0x04,
+  EXECUTE_READ: 0x20,
+  EXECUTE_READWRITE: 0x40,
+  EXECUTE_WRITECOPY: 0x80,
 } as const
 
 export const AllocationType = {
@@ -50,11 +55,77 @@ export interface ScanOptions {
   end?: number | bigint
   /** restrict to a module's range */
   module?: string
+  /** restrict to a named PE section of `module` (e.g. '.text'); requires `module` */
+  section?: string
   /** only scan readable regions (default true) */
   onlyReadable?: boolean
 }
 
+export type ScanValueType = 'int32' | 'uint32' | 'int64' | 'uint64' | 'float' | 'double'
+export type WriteValueType = ScanValueType | 'pointer'
+
+export interface ScanValueOptions {
+  /** value type (default 'int32') */
+  type?: ScanValueType
+  /** start address (default 0) */
+  start?: number | bigint
+  /** end address (default: top of user space) */
+  end?: number | bigint
+  /** restrict to a module's range */
+  module?: string
+  /** only scan writable regions (default true) */
+  onlyWritable?: boolean
+  /** candidate alignment in bytes (default: value width) */
+  alignment?: number
+}
+
 const toNum = (v: number | bigint | undefined) => (v === undefined ? undefined : Number(v))
+
+const MAX_READ_BYTES = 512 * 1024 * 1024
+function checkSize(size: number): void {
+  if (!Number.isFinite(size) || size < 0 || size > MAX_READ_BYTES)
+    throw new RangeError('size must be a finite number between 0 and 512MB')
+}
+
+// Encode a typed little-endian value for value scans / writes.
+export function encodeValue(type: WriteValueType, value: number | bigint): Buffer {
+  const b = Buffer.alloc(type === 'int64' || type === 'uint64' || type === 'double' || type === 'pointer' ? 8 : 4)
+  switch (type) {
+    case 'int32': b.writeInt32LE(Number(value)); break
+    case 'uint32': b.writeUInt32LE(Number(value) >>> 0); break
+    case 'int64': b.writeBigInt64LE(BigInt(value)); break
+    case 'uint64': b.writeBigUInt64LE(BigInt(value)); break
+    case 'pointer': b.writeBigUInt64LE(BigInt(value)); break
+    case 'float': b.writeFloatLE(Number(value)); break
+    case 'double': b.writeDoubleLE(Number(value)); break
+    default: throw new TypeError(`unknown type ${type}`)
+  }
+  return b
+}
+
+function decodeValue(buf: Buffer, off: number, type: WriteValueType): number | bigint {
+  switch (type) {
+    case 'int32': return buf.readInt32LE(off)
+    case 'uint32': return buf.readUInt32LE(off)
+    case 'int64': return buf.readBigInt64LE(off)
+    case 'uint64': return buf.readBigUInt64LE(off)
+    case 'pointer': return buf.readBigUInt64LE(off)
+    case 'float': return buf.readFloatLE(off)
+    case 'double': return buf.readDoubleLE(off)
+    default: throw new TypeError(`unknown type ${type}`)
+  }
+}
+
+const VALUE_WIDTHS: Record<WriteValueType, number> = {
+  int32: 4, uint32: 4, float: 4, int64: 8, uint64: 8, double: 8, pointer: 8,
+}
+
+const REL32_MIN = -0x80000000n
+const REL32_MAX = 0x7fffffffn
+function checkRel32(rel: bigint): void {
+  if (rel < REL32_MIN || rel > REL32_MAX)
+    throw new Error(`target out of rel32 range (rel=${rel}, must be within ±2GB)`)
+}
 
 export class Process implements Disposable {
   #handle: number
@@ -116,6 +187,7 @@ export class Process implements Disposable {
 
   readBuffer(addr: number | bigint, size: number): Buffer {
     this.assertOpen()
+    checkSize(size)
     try { return native.readBuffer(this.#handle, Number(addr), size) }
     catch { throw new ReadError(addr) }
   }
@@ -150,6 +222,7 @@ export class Process implements Disposable {
    */
   readSafe(addr: number | bigint, size: number): Buffer {
     this.assertOpen()
+    checkSize(size)
     try { return native.readSafe(this.#handle, Number(addr), size) }
     catch (e: any) { throw new ReadError(addr, e?.win32code) }
   }
@@ -221,10 +294,14 @@ export class Process implements Disposable {
   regions(): Region[] { this.assertOpen(); return native.getRegions(this.#handle) }
 
   // ---- memory management ----
-  /** Allocate memory in the remote process. Returns base address (bigint). */
-  alloc(size: number, protection: number = Protection.PAGE_EXECUTE_READWRITE): bigint {
+  /**
+   * Allocate memory in the remote process. Returns base address (bigint).
+   * `nearAddress` is passed to VirtualAllocEx as the lpAddress hint — used to
+   * land allocations within ±2GB of a target (required for rel32 patches).
+   */
+  alloc(size: number, protection: number = Protection.PAGE_EXECUTE_READWRITE, nearAddress?: number | bigint): bigint {
     this.assertOpen()
-    return native.allocMemory(this.#handle, size, protection)
+    return native.allocMemory(this.#handle, size, protection, nearAddress === undefined ? undefined : Number(nearAddress))
   }
   /** Free remote memory allocated with {@link alloc}. */
   free(addr: number | bigint): boolean {
@@ -256,20 +333,22 @@ export class Process implements Disposable {
   nop(addr: number | bigint, len: number): boolean {
     return this.writeProtected(addr, Buffer.alloc(len, 0x90))
   }
-  /** Write an E9 relative jump from `src` to `dst` (5 bytes). */
+  /** Write an E9 relative jump from `src` to `dst` (5 bytes). Throws when `dst` is outside rel32 range. */
   patchJump(src: number | bigint, dst: number | bigint): boolean {
     const rel = BigInt(dst) - (BigInt(src) + 5n)
+    checkRel32(rel)
     const buf = Buffer.alloc(5)
     buf[0] = 0xe9
-    buf.writeInt32LE(Number(BigInt.asIntN(32, rel)), 1)
+    buf.writeInt32LE(Number(rel), 1)
     return this.writeProtected(src, buf)
   }
-  /** Write an E8 relative call from `src` to `dst` (5 bytes). */
+  /** Write an E8 relative call from `src` to `dst` (5 bytes). Throws when `dst` is outside rel32 range. */
   patchCall(src: number | bigint, dst: number | bigint): boolean {
     const rel = BigInt(dst) - (BigInt(src) + 5n)
+    checkRel32(rel)
     const buf = Buffer.alloc(5)
     buf[0] = 0xe8
-    buf.writeInt32LE(Number(BigInt.asIntN(32, rel)), 1)
+    buf.writeInt32LE(Number(rel), 1)
     return this.writeProtected(src, buf)
   }
 
@@ -309,21 +388,73 @@ export class Process implements Disposable {
     if (stolenLen < 5) throw new WriteError(s)
     const stolen = this.readBuffer(s, stolenLen)
 
-    const stub = this.alloc(stolenLen + 5, Protection.PAGE_EXECUTE_READWRITE)
+    // The stub needs to reach `s` with a rel32 jmp-back, so it MUST land
+    // within ±2GB of `src`. Hint VirtualAllocEx at candidate pages inside the
+    // window; if the window is exhausted this throws rather than silently
+    // writing a truncated rel32.
+    const stub = this.#allocNear(s, stolenLen + 5, Protection.PAGE_EXECUTE_READWRITE)
     const back = Buffer.alloc(stolenLen + 5)
     stolen.copy(back, 0)
     back[stolenLen] = 0xe9
     const relBack = (s + BigInt(stolenLen)) - (stub + BigInt(stolenLen) + 5n)
-    back.writeInt32LE(Number(BigInt.asIntN(32, relBack)), stolenLen + 1)
+    checkRel32(relBack)
+    back.writeInt32LE(Number(relBack), stolenLen + 1)
     this.writeBuffer(stub, back)
 
     const patch = Buffer.alloc(stolenLen, 0xcc)
     patch[0] = 0xe9
     const relDst = d - (s + 5n)
-    patch.writeInt32LE(Number(BigInt.asIntN(32, relDst)), 1)
+    checkRel32(relDst)
+    patch.writeInt32LE(Number(relDst), 1)
     this.writeProtected(s, patch)
 
     return { src: s, dst: d, stub, stolen }
+  }
+
+  /**
+   * Allocate `size` bytes within rel32 range (±2GB) of `target` in the remote
+   * process. Tries VirtualAllocEx hints on 64KB-spaced candidates below and
+   * above the target; falls back to a non-hinted alloc (then range-checks).
+   */
+  #allocNear(target: bigint, size: number, protection: number): bigint {
+    const WINDOW = 0x7fff0000n // stay comfortably inside ±2GB
+    const STEP = 0x10000n      // 64KB allocation granularity
+    const lo = target > WINDOW ? target - WINDOW : 0x10000n
+    const hi = target + WINDOW < 0x7fffffffffffn ? target + WINDOW : 0x7fffffffffffn
+    // scan outward from the target — first hits are likeliest to be free
+    for (const hint of [target, target - STEP, target + STEP, lo, lo + STEP, hi - STEP]) {
+      if (hint < lo || hint > hi) continue
+      const q = this.queryAddress(hint)
+      if (q !== null) continue // occupied — pick a different candidate
+      try {
+        const p = this.alloc(size, protection, hint)
+        if (p >= lo && p <= hi) return p
+        this.free(p)
+      } catch { /* hint rejected — try next */ }
+    }
+    // walk below the target in 64KB steps looking for a free gap
+    for (let hint = target - STEP; hint >= lo; hint -= STEP) {
+      if (this.queryAddress(hint) !== null) continue
+      try {
+        const p = this.alloc(size, protection, hint)
+        if (p >= lo && p <= hi) return p
+        this.free(p)
+      } catch { /* keep walking */ }
+    }
+    for (let hint = target + STEP; hint <= hi; hint += STEP) {
+      if (this.queryAddress(hint) !== null) continue
+      try {
+        const p = this.alloc(size, protection, hint)
+        if (p >= lo && p <= hi) return p
+        this.free(p)
+      } catch { /* keep walking */ }
+    }
+    // last resort: unhinted — usually lands in low VA on fresh processes
+    const p = this.alloc(size, protection)
+    const rel = p - target
+    if (rel >= REL32_MIN && rel <= REL32_MAX) return p
+    this.free(p)
+    throw new Error(`target out of rel32 range: could not allocate within ±2GB of 0x${target.toString(16)}`)
   }
 
   /** Restore stolen bytes at `h.src` and free the stub. Returns combined ok. */
@@ -371,6 +502,28 @@ export class Process implements Disposable {
   suspendAll(): number[] { const t = this.threads(); t.forEach(id => this.suspendThread(id)); return t }
   /** Resume all threads of this process. */
   resumeAll(): void { this.threads().forEach(id => this.resumeThread(id)) }
+  /**
+   * Suspend the whole process atomically via NtSuspendProcess — preferred over
+   * {@link suspendAll} which races with new-thread creation. Pair with
+   * {@link resumeProcess}.
+   */
+  suspendProcess(): boolean { return native.suspendProcess(this.pid) }
+  /** Resume a process suspended by {@link suspendProcess}. */
+  resumeProcess(): boolean { return native.resumeProcess(this.pid) }
+  /**
+   * Wait for the process to exit. Resolves the exit code, or null on timeout.
+   * Pass no timeoutMs to wait indefinitely.
+   */
+  waitForExit(timeoutMs?: number): Promise<number | null> {
+    this.assertOpen()
+    return native.waitForExit(this.pid, timeoutMs)
+  }
+  /**
+   * Grant the CALLING process SeDebugPrivilege so it can open
+   * protected/system processes. Returns false when the token can't hold the
+   * privilege (e.g. not elevated).
+   */
+  static enableDebugPrivilege(): boolean { return native.enableDebugPrivilege() }
 
   // ---- tier-3: query / context / remote call ----
 
@@ -426,7 +579,8 @@ export class Process implements Disposable {
     this.assertOpen()
     const ctx = this.getThreadContext(tid)
     if (!ctx) return false
-    const lenBits = size === 1 ? 0n : size === 2 ? 1n : size === 8 ? 3n : 2n // 00=1 01=2 10=8 11=4
+    // Intel Dr7 LEN encoding: 00=1 byte, 01=2, 11=4, 10=8
+    const lenBits = size === 1 ? 0n : size === 2 ? 1n : size === 4 ? 3n : 2n
     const shift = BigInt(16 + slot * 4)
     let dr7 = ctx.dr7
     dr7 &= ~(0xfn << shift)                 // clear RW+LEN for this slot
@@ -503,6 +657,11 @@ export class Process implements Disposable {
    */
   resolveExport(moduleName: string, exportName: string): bigint | null {
     this.assertOpen()
+    return this.#resolveExportImpl(moduleName, exportName, 0)
+  }
+
+  #resolveExportImpl(moduleName: string, exportName: string, depth: number): bigint | null {
+    if (depth > 4) return null // chained-forwarder cycle guard
     const m = this.module(moduleName)
     if (!m) return null
     const base = BigInt(m.base)
@@ -515,21 +674,37 @@ export class Process implements Disposable {
       const magic = nt.readUInt16LE(0x18)
       const ddBase = magic === 0x20b ? 0x88 : 0x78 // optional-header data dir offset
       const expRva = nt.readUInt32LE(ddBase)
+      const expSize = nt.readUInt32LE(ddBase + 4)
       if (!expRva) return null
       const exp = this.readSafe(base + BigInt(expRva), 0x28)
       const nNames = exp.readUInt32LE(0x18)
+      const nFuncs = exp.readUInt32LE(0x14)
       const namesRva = exp.readUInt32LE(0x20)
       const ordsRva = exp.readUInt32LE(0x24)
       const funcsRva = exp.readUInt32LE(0x1c)
+      if (nNames > 0x100000 || nFuncs > 0x100000) return null // corrupt PE guard
       const names = this.readSafe(base + BigInt(namesRva), nNames * 4)
       for (let i = 0; i < nNames; i++) {
         const nameRva = names.readUInt32LE(i * 4)
-        const name = this.readString(base + BigInt(nameRva), 256)
-        if (name === exportName) {
-          const ord = this.readSafe(base + BigInt(ordsRva) + BigInt(i * 2), 2).readUInt16LE(0)
-          const fnRva = this.readSafe(base + BigInt(funcsRva) + BigInt(ord * 4), 4).readUInt32LE(0)
-          return base + BigInt(fnRva)
+        let name: string
+        try { name = this.readString(base + BigInt(nameRva), 256) }
+        catch { continue } // one bad name RVA mustn't kill the whole walk
+        if (name !== exportName) continue
+        const ord = this.readSafe(base + BigInt(ordsRva) + BigInt(i * 2), 2).readUInt16LE(0)
+        if (ord >= nFuncs) return null
+        const fnRva = this.readSafe(base + BigInt(funcsRva) + BigInt(ord * 4), 4).readUInt32LE(0)
+        // Forwarder: RVA points INSIDE the export directory → it's an ASCII
+        // "DLLNAME.ExportName" string (common for kernel32→KernelBase stubs).
+        if (fnRva >= expRva && fnRva < expRva + expSize) {
+          const fwd = this.readString(base + BigInt(fnRva), 256)
+          const dot = fwd.indexOf('.')
+          if (dot <= 0) return null
+          const dll = fwd.slice(0, dot).toLowerCase()
+          const fn = fwd.slice(dot + 1)
+          const target = /\.dll$/i.test(dll) ? dll : `${dll}.dll`
+          return this.#resolveExportImpl(target, fn, depth + 1)
         }
+        return base + BigInt(fnRva)
       }
       return null
     } catch { return null }
@@ -602,8 +777,142 @@ export class Process implements Disposable {
     if (opts.module) {
       const m = this.module(opts.module)
       if (m) { start = m.base; end = m.base + m.size }
+      if (opts.section && m) {
+        const sec = this.#sectionRange(BigInt(m.base), opts.section)
+        if (!sec) return [] // module has no such section
+        start = sec[0]; end = sec[1]
+      }
     }
-    return native.scan(this.#handle, pattern, { start, end, onlyReadable: opts.onlyReadable ?? true })
+    return native.scan(this.pid, pattern, { start, end, onlyReadable: opts.onlyReadable ?? true })
+  }
+
+  /**
+   * Parse a module's PE section headers remotely and return [start, end) for
+   * the section named `name` (e.g. '.text'), or null. Virtual addresses.
+   */
+  #sectionRange(base: bigint, name: string): [number, number] | null {
+    try {
+      const hdr = this.readSafe(base, 0x1000)
+      if (hdr.readUInt16LE(0) !== 0x5a4d) return null
+      const peOff = hdr.readUInt32LE(0x3c)
+      const nt = this.readSafe(base + BigInt(peOff), 0x400)
+      if (nt.readUInt32LE(0) !== 0x4550) return null
+      const optSize = nt.readUInt16LE(0x14) // SizeOfOptionalHeader
+      const nSections = nt.readUInt16LE(0x6)
+      const sectionsOff = 0x18 + optSize
+      const secs = this.readSafe(base + BigInt(peOff + sectionsOff), nSections * 40)
+      const want = name.toLowerCase()
+      for (let i = 0; i < nSections; i++) {
+        const sName = secs.subarray(i * 40, i * 40 + 8).toString('ascii').replace(/\0.*$/, '').toLowerCase()
+        if (sName === want) {
+          const vsize = secs.readUInt32LE(i * 40 + 8)
+          const va = secs.readUInt32LE(i * 40 + 12)
+          const raw = secs.readUInt32LE(i * 40 + 16)
+          const sz = vsize || raw
+          const start = base + BigInt(va)
+          return [Number(start), Number(start + BigInt(sz))]
+        }
+      }
+      return null
+    } catch { return null }
+  }
+
+  /**
+   * Cheat-Engine-style typed value scan: find all (aligned) little-endian
+   * occurrences of `value` in committed memory. Default scans writable
+   * regions only — pass `onlyWritable: false` to include read-only data.
+   */
+  async scanValue(value: number | bigint, opts: ScanValueOptions = {}): Promise<bigint[]> {
+    this.assertOpen()
+    const type = opts.type ?? 'int32'
+    const needle = encodeValue(type, value)
+    let start = toNum(opts.start)
+    let end = toNum(opts.end)
+    if (opts.module) {
+      const m = this.module(opts.module)
+      if (m) { start = m.base; end = m.base + m.size }
+    }
+    return native.scanValue(this.pid, needle, {
+      start, end,
+      onlyWritable: opts.onlyWritable ?? true,
+      alignment: opts.alignment ?? VALUE_WIDTHS[type],
+    })
+  }
+
+  /**
+   * Refine a previous scan (CE "next scan"): re-reads each hit and keeps only
+   * addresses whose current value still equals `value` (or falls inside
+   * `opts.range = [lo, hi]` — CE "value between"). Reads are batched one
+   * readSafe per 4KB page group, so it's fast on large hit lists.
+   */
+  async nextScan(hits: readonly bigint[], value: number | bigint, opts: { type?: ScanValueType; range?: [number | bigint, number | bigint] } = {}): Promise<bigint[]> {
+    this.assertOpen()
+    if (hits.length === 0) return []
+    const type = opts.type ?? 'int32'
+    const width = VALUE_WIDTHS[type]
+    const PAGE = 0x1000n
+
+    // group hits by 4KB page
+    const byPage = new Map<bigint, { hit: bigint; off: number }[]>()
+    for (const h of hits) {
+      const page = BigInt(h) / PAGE
+      const off = Number(BigInt(h) % PAGE)
+      let g = byPage.get(page)
+      if (!g) { g = []; byPage.set(page, g) }
+      g.push({ hit: BigInt(h), off })
+    }
+
+    const matches = (v: number | bigint): boolean => {
+      if (opts.range) {
+        const [lo, hi] = opts.range
+        return BigInt(v) >= BigInt(lo) && BigInt(v) <= BigInt(hi)
+      }
+      if (type === 'float' || type === 'double')
+        return Math.abs(Number(v) - Number(value)) < 1e-6
+      return BigInt(v) === BigInt(value)
+    }
+
+    const out: bigint[] = []
+    const pages = [...byPage.entries()]
+    const BATCH = 64
+    for (let i = 0; i < pages.length; i += BATCH) {
+      const slice = pages.slice(i, i + BATCH)
+      const bufs = await Promise.all(slice.map(([page]) =>
+        Promise.resolve().then(() => {
+          try { return this.readSafe(page * PAGE, 0x1000) } catch { return null }
+        })
+      ))
+      for (let j = 0; j < slice.length; j++) {
+        const buf = bufs[j]
+        if (!buf) continue
+        for (const { hit, off } of slice[j]![1]) {
+          if (off + width > buf.length) continue
+          try {
+            if (matches(decodeValue(buf, off, type))) out.push(hit)
+          } catch { /* unreadable tail */ }
+        }
+      }
+      // yield to the event loop so huge hit lists don't starve timers
+      if (i + BATCH < pages.length) await Promise.resolve()
+    }
+    return out
+  }
+
+  /**
+   * Freeze a remote value: writes `value` at `addr` every `intervalMs`.
+   * Returns an unfreeze function. Write failures are ignored (target may
+   * exit); call the returned function (or close()) to stop.
+   */
+  freeze(addr: number | bigint, type: ScanValueType, value: number | bigint, intervalMs = 50): () => void {
+    this.assertOpen()
+    const timer = setInterval(() => {
+      try {
+        native.writeValue(this.#handle, Number(addr), type,
+          (type === 'int64' || type === 'uint64') ? BigInt(value) : value)
+      } catch { /* closed or unwritable — ignore */ }
+    }, intervalMs)
+    if (typeof timer.unref === 'function') timer.unref()
+    return () => clearInterval(timer)
   }
 
   /** First match for `pattern`, or null when nothing matches. */

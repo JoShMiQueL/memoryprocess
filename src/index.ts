@@ -1,5 +1,5 @@
-export { Process, RegionView } from './process.js'
-export type { ProcessInfo, ModuleInfo, Region, ScanOptions, ThreadContext } from './process.js'
+export { Process, RegionView, encodeValue } from './process.js'
+export type { ProcessInfo, ModuleInfo, Region, ScanOptions, ScanValueOptions, ScanValueType, WriteValueType, ThreadContext } from './process.js'
 export { Protection, AllocationType, ProcessAccess } from './process.js'
 export {
   MemoryProcessError,

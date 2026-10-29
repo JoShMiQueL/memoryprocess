@@ -39,4 +39,11 @@ Napi::Value CallRemoteSync(const Napi::CallbackInfo& info);       // CreateRemot
 // v2 disasm (HDE64 length decode)
 Napi::Value DisasmInstructionsSync(const Napi::CallbackInfo& info); // hde64_disasm walk
 
+// v2.1 additions
+Napi::Value ScanValueAsync(const Napi::CallbackInfo& info);          // typed value scan (rolling window)
+Napi::Value SuspendProcessSync(const Napi::CallbackInfo& info);      // NtSuspendProcess
+Napi::Value ResumeProcessSync(const Napi::CallbackInfo& info);       // NtResumeProcess
+Napi::Value EnableDebugPrivilegeSync(const Napi::CallbackInfo& info);// SeDebugPrivilege on self
+Napi::Value WaitForExitAsync(const Napi::CallbackInfo& info);        // async WaitForSingleObject
+
 } // namespace mp
