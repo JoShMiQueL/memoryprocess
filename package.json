@@ -3,6 +3,7 @@
   "version": "2.0.0-dev.0",
   "description": "Read and write Windows process memory from Node.js / Bun. N-API native addon.",
   "type": "module",
+  "packageManager": "bun@1.4.4",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {

@@ -10,11 +10,18 @@ concurrency:
   group: publish
   cancel-in-progress: false
 
+# Least privilege: only the publish job mints an OIDC id-token.
+permissions:
+  contents: read
+
 jobs:
   verify-tag:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Tag must match package.json version
         run: |
           TAG="$GITHUB_REF_NAME"
@@ -28,17 +35,23 @@ jobs:
   prebuild:
     needs: verify-tag
     runs-on: windows-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.4
+          bun-version-file: package.json
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
       - name: Install dependencies
         run: bun install --frozen-lockfile
       - name: Build + prebuild
         run: |
           bun run build
-          bun run prebuild
+          bun run prebuild:all
       - uses: actions/upload-artifact@v6
         with:
           name: prebuilds
@@ -47,18 +60,21 @@ jobs:
   publish:
     needs: [verify-tag, prebuild]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v6
         with:
           name: prebuilds
           path: prebuilds/
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.4
+          bun-version-file: package.json
       - uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
