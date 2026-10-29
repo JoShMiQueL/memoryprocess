@@ -91,32 +91,89 @@ const VALUE_READERS: Record<
 /* Address — cached base + fluent offset/deref chain                    */
 /* ------------------------------------------------------------------ */
 
+/** Strict parse of an unsigned hex/dec literal — rejects '', '0x', 'GG', signs. */
+function parseUint(what: string, s: string): bigint {
+  const t = s.trim();
+  if (t === '' || /^[-+]/.test(t))
+    throw new MemoryProcessError(
+      `invalid ${what}: "${s}" — expected unsigned hex/dec`,
+      'INVALID_ADDRESS_EXPR',
+    );
+  let v: bigint;
+  try {
+    v = BigInt(t);
+  } catch {
+    throw new MemoryProcessError(
+      `invalid ${what}: "${s}" — expected unsigned hex/dec`,
+      'INVALID_ADDRESS_EXPR',
+    );
+  }
+  if (v < 0n)
+    throw new MemoryProcessError(
+      `invalid ${what}: "${s}" — must be ≥ 0`,
+      'INVALID_ADDRESS_EXPR',
+    );
+  return v;
+}
+
+/** Does `s` look like a module reference (letters/dots) rather than a numeric literal? */
+const LOOKS_LIKE_MODULE = /[a-zA-Z]/;
+
 /**
- * Resolve a `"module+rva"` string or a numeric base to a bigint address.
- * Throws when a module string is given but the module isn't loaded.
+ * Resolve a `"module+rva"` string, a bare numeric string, or a numeric base
+ * to a bigint address. Strict: malformed expressions throw
+ * `MemoryProcessError('INVALID_ADDRESS_EXPR')`, a missing module throws
+ * `'MODULE_NOT_FOUND'`.
  */
 function resolveBase(proc: Process, base: number | bigint | string): bigint {
   if (typeof base !== 'string') return BigInt(base);
-  const i = base.indexOf('+');
-  if (i === -1) return BigInt(base); // plain hex/dec address as string
-  const modName = base.slice(0, i).trim();
-  const rvaStr = base.slice(i + 1).trim();
+  const s = base.trim();
+  const plus = s.indexOf('+');
+  const minus = s.indexOf('-');
+
+  if (plus === -1) {
+    if (minus > 0)
+      throw new MemoryProcessError(
+        `invalid address "${s}" — use 'module+rva' ('-' offsets aren't supported in the base expression; put negative offsets in the chain)`,
+        'INVALID_ADDRESS_EXPR',
+      );
+    if (LOOKS_LIKE_MODULE.test(s) && !/^0[xX]/.test(s)) {
+      // bare module name reaching here means it isn't loaded —
+      // isModuleName() checks first and diverts to the module+rva path.
+      throw new MemoryProcessError(
+        `module ${s} not loaded`,
+        'MODULE_NOT_FOUND',
+      );
+    }
+    return parseUint('address', s);
+  }
+
+  const modName = s.slice(0, plus).trim();
+  const rvaStr = s.slice(plus + 1).trim();
+  if (modName === '')
+    throw new MemoryProcessError(
+      `invalid address "${s}" — missing module before '+'`,
+      'INVALID_ADDRESS_EXPR',
+    );
+  if (rvaStr.includes('+') || rvaStr.includes('-'))
+    throw new MemoryProcessError(
+      `invalid address "${s}" — only one '+' allowed ('module+rva')`,
+      'INVALID_ADDRESS_EXPR',
+    );
   const mod = proc.module(modName);
   if (!mod)
     throw new MemoryProcessError(
       `module ${modName} not loaded`,
       'MODULE_NOT_FOUND',
     );
-  return BigInt(mod.base) + BigInt(rvaStr);
+  return BigInt(mod.base) + parseUint('rva', rvaStr);
 }
 
 /** True when `base` is a bare module name (no `+`) that resolves to a loaded module. */
 function isModuleName(proc: Process, base: number | bigint | string): boolean {
-  return (
-    typeof base === 'string' &&
-    !base.includes('+') &&
-    proc.module(base.trim()) !== undefined
-  );
+  if (typeof base !== 'string') return false;
+  const s = base.trim();
+  return !s.includes('+') && proc.module(s) !== undefined;
 }
 
 /**
@@ -150,6 +207,11 @@ export class Address {
     if (isModuleName(proc, base)) {
       const mod = proc.module((base as string).trim())!;
       const [rva, ...rest] = chain;
+      if (rva !== undefined && (!Number.isFinite(rva) || rva < 0))
+        throw new MemoryProcessError(
+          `invalid rva ${rva} for module '${base}' — must be ≥ 0`,
+          'INVALID_ADDRESS_EXPR',
+        );
       this.base = BigInt(mod.base) + BigInt(rva ?? 0);
       this.chain = rest;
     } else {

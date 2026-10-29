@@ -75,6 +75,52 @@ describe('proc.addr — CE-style mod+rva + chain', () => {
     expect(p.i32.readInt32()).toBe(0x12345678);
     expect(p.chained.resolve()).toBe(victim.addr.g_i32);
   });
+
+  describe('addr() validation — descriptive errors, no silent garbage', () => {
+    test.each([
+      ['victim.exe+', 'empty rva'],
+      ['victim.exe+0x', 'empty hex'],
+      ['victim.exe+GG', 'bad hex'],
+      ['victim.exe+-5', 'signed rva'],
+      ['victim.exe+0x10+0x20', 'double +'],
+      ['+0x10', 'missing module'],
+      ['victim.exe-0x10', 'minus form'],
+      ['nosuch.dll+0x10', 'module missing'],
+      ['nosuch.dll', 'bare missing module'],
+      ['', 'empty string'],
+    ])('proc.addr(%j) throws descriptive error (%s)', (expr, _why) => {
+      using proc = Process.open(victim.pid);
+      try {
+        proc.addr(expr);
+        expect.unreachable('should have thrown');
+      } catch (e: any) {
+        expect(e).toBeInstanceOf(Error);
+        expect(['INVALID_ADDRESS_EXPR', 'MODULE_NOT_FOUND']).toContain(e.code);
+        expect(e.message.length).toBeGreaterThan(10);
+      }
+    });
+
+    test('bare module + negative rva arg throws', () => {
+      using proc = Process.open(victim.pid);
+      expect(() => proc.addr('victim.exe', -1)).toThrow(/invalid rva/);
+    });
+
+    test("hex-string base still works ('0x...' isn't a module)", () => {
+      using proc = Process.open(victim.pid);
+      const a = proc.addr(`0x${victim.addr.g_i32.toString(16)}`);
+      expect(a.readInt32()).toBe(0x12345678);
+    });
+
+    test("'mod+rva' + chain[0] is a DEREF offset, not double-rva (documented)", () => {
+      using proc = Process.open(victim.pid);
+      const mod = proc.module('victim.exe')!;
+      // 'victim.exe+rva(g_ppp)' + [0,0,0] walks g_ppp→g_i32 — the chain
+      // offsets are deref hops, they are NOT added to the base again.
+      const rva = Number(victim.addr.g_ppp) - mod.base;
+      const a = proc.addr(`victim.exe+0x${rva.toString(16)}`, 0, 0, 0);
+      expect(a.resolve()).toBe(victim.addr.g_i32);
+    });
+  });
 });
 
 describe('Offsets — cs2-dumper + hazedumper + property access', () => {
