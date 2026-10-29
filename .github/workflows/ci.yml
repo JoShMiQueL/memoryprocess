@@ -62,9 +62,11 @@ jobs:
         run: bun test
 
   # The addon must LOAD on every supported Node version. A .node linked against
-  # Node 24's node.lib can crash on Node 20, so each matrix leg rebuilds the
-  # native addon against its own Node headers (node-gyp only — the JS bundle
-  # toolchain needs modern Node and isn't exercised by the compat smoke).
+  # one version's node.lib can crash on another, so each matrix leg rebuilds the
+  # native addon against its own headers (node-gyp only — the JS bundle toolchain
+  # needs modern Node and isn't exercised by the compat smoke).
+  #   22 = Maintenance LTS · 24 = Active LTS · 25 = Current · 26 = newest LTS
+  #   Node 26 is clang+thin-LTO built — the binding.gyp workaround is exercised here.
   compat:
     needs: verify
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
@@ -73,7 +75,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: ['20', '22', '24']
+        node: ['22', '24', '25', '26']
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
@@ -96,3 +98,39 @@ jobs:
 
       - name: Compat smoke (node ${{ matrix.node }})
         run: node --test tests/compat/smoke.test.mjs
+
+  # The thing a real user installs is the TARBALL, not the repo. Pack it, install
+  # into a clean dir, and load it — catches missing files / broken dist/ / bad
+  # "files" allowlist that the in-repo tests can't see.
+  packaged:
+    needs: verify
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build native addon
+        run: bun run build
+
+      - name: Pack tarball
+        run: |
+          $tgz = npm pack --pack-destination "$env:RUNNER_TEMP" | Select-Object -Last 1
+          echo "TGZ=$env:RUNNER_TEMP\$tgz" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Install tarball in clean dir + smoke
+        run: |
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\consumer" | Out-Null
+          Set-Location "$env:RUNNER_TEMP\consumer"
+          npm init -y | Out-Null
+          npm install "$env:TGZ" | Out-Null
+          node --input-type=module -e "import { Process } from 'memoryprocess'; const p = Process.list(); if (!p.length) throw new Error('list empty'); console.log('OK', p.length, 'processes')"
