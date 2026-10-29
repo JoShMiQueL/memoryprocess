@@ -17,6 +17,11 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.4
+      # Build toolchain (tsdown/tsc/node-gyp) needs a modern Node; the produced
+      # .node is N-API and stays binary-compatible across runtime versions.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
       - uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
@@ -39,28 +44,12 @@ jobs:
       - name: Build native addon
         run: bun run build
 
-  test:
-    needs: verify
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest]
-        node: ['20', '22', '24']
-    steps:
-      - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
+      - name: Upload built addon
+        uses: actions/upload-artifact@v4
         with:
-          bun-version: 1.4.4
-      - uses: actions/setup-node@v6
-        with:
-          node-version: ${{ matrix.node }}
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Build native addon
-        run: bun run build
+          name: memoryprocess-node
+          path: dist/memoryprocess.node
+          retention-days: 1
 
       - name: Build test victim
         run: node scripts/build-victim.mjs
@@ -71,5 +60,27 @@ jobs:
       - name: Test (bun)
         run: bun test
 
+  # The single N-API build must LOAD on every supported Node version — that is
+  # the real matrix guarantee. Only the compat smoke runs per-version (no
+  # rebuild, since the toolchain requires a modern Node to build).
+  compat:
+    needs: verify
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22', '24']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Download built addon
+        uses: actions/download-artifact@v4
+        with:
+          name: memoryprocess-node
+          path: dist/
+
       - name: Compat smoke (node ${{ matrix.node }})
-        run: node --test tests/compat/
+        run: node --test tests/compat/*.test.mjs
