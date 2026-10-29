@@ -3,7 +3,7 @@
 // it only demonstrates the mechanics — adapt addresses to your target.
 //
 // Run: bun examples/code-cave.ts <pid-or-name>
-import { Process, Protection } from '../src/index.js';
+import { Process } from '../src/index.js';
 
 const target = process.argv[2] ?? 'notepad.exe';
 using proc = Process.open(/^\d+$/.test(target) ? Number(target) : target);

@@ -19,11 +19,13 @@ try {
   console.log(`injected ${dllPath}`);
 
   // the loader needs a moment — poll until the module shows up
+  // (runtime-agnostic sleep — works under bun and node alike)
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const dllName = dllPath.split(/[\\/]/).pop()!;
   let mod;
   for (let i = 0; i < 50 && !mod; i++) {
     mod = proc.module(dllName);
-    if (!mod) await Bun.sleep(100);
+    if (!mod) await sleep(100);
   }
   if (!mod)
     throw new Error('module never appeared — injection may have failed');
