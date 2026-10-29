@@ -60,3 +60,15 @@ export class InjectError extends MemoryProcessError {
     this.name = 'InjectError';
   }
 }
+export class ProcessClosedError extends MemoryProcessError {
+  constructor() {
+    super('Process handle is closed', 'PROCESS_CLOSED');
+    this.name = 'ProcessClosedError';
+  }
+}
+export class InvalidSchemaError extends MemoryProcessError {
+  constructor(detail: string) {
+    super(`Invalid entity schema: ${detail}`, 'INVALID_SCHEMA');
+    this.name = 'InvalidSchemaError';
+  }
+}

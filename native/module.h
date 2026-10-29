@@ -47,4 +47,9 @@ Napi::Value EnableDebugPrivilegeSync(const Napi::CallbackInfo& info);// SeDebugP
 Napi::Value WaitForExitAsync(const Napi::CallbackInfo& info);        // async WaitForSingleObject
 Napi::Value FindWhatWritesAsync(const Napi::CallbackInfo& info);     // DebugActiveProcess + HW write-bp loop
 
+// QA4 hardening additions
+Napi::Value HookStealSync(const Napi::CallbackInfo& info);           // steal+relocate-check for hook
+Napi::Value WriteProtectedMemorySync(const Napi::CallbackInfo& info);// per-region protect/write/restore
+Napi::Value CurrentThreadIdSync(const Napi::CallbackInfo& info);     // GetCurrentThreadId (suspendAll)
+
 } // namespace mp

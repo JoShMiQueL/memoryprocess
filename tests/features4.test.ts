@@ -108,19 +108,58 @@ describe('hook / unhook', () => {
     }
   });
 
-  test('steals whole instructions — 7-byte lead instr is not split', () => {
+  test('steals whole instructions — 10-byte lead instr is not split', () => {
     using proc = Process.open(victim.pid);
     const addr = proc.alloc(0x1000, Protection.EXECUTE_READWRITE);
     try {
       const h2 = addr;
       const g = addr + 0x100n;
-      // first instruction is 7 bytes; hook must steal >=7, never 5
-      proc.writeBuffer(h2, Buffer.from([...MOV_RAX_RIP, 0x90, 0x90, 0xc3]));
+      // first instruction is 10 bytes (mov rax,imm64); hook must steal >=10,
+      // never 5. (The old test used a RIP-relative mov — hookSteal now REFUSES
+      // those, which is the point of the fix: see 'refuses RIP-relative' test.)
+      const MOV_RAX_IMM64 = [
+        0x48, 0xb8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11,
+      ];
+      proc.writeBuffer(h2, Buffer.from([...MOV_RAX_IMM64, 0xc3]));
       proc.writeBuffer(g, Buffer.from(RET_99));
 
       const h = proc.hook(h2, g);
-      expect(h.stolen.length).toBe(7);
+      expect(h.stolen.length).toBe(10);
       expect(proc.unhook(h)).toBe(true);
+    } finally {
+      proc.free(addr);
+    }
+  });
+
+  test('refuses to steal position-relative instructions (relocate unsafe)', () => {
+    using proc = Process.open(victim.pid);
+    const addr = proc.alloc(0x1000, Protection.EXECUTE_READWRITE);
+    try {
+      const g = addr + 0x100n;
+      // mov rax,[rip+disp] — RIP-relative operand: copying it verbatim into a
+      // stub at a different address reads the WRONG location → hook must refuse.
+      proc.writeBuffer(addr, Buffer.from([...MOV_RAX_RIP, 0x90, 0x90, 0xc3]));
+      proc.writeBuffer(g, Buffer.from(RET_99));
+      expect(() => proc.hook(addr, g)).toThrow(
+        /relocat|position-relative|HOOK/i,
+      );
+    } finally {
+      proc.free(addr);
+    }
+  });
+
+  test('double-hook refused — own E9 patch decodes as position-relative', () => {
+    using proc = Process.open(victim.pid);
+    const addr = proc.alloc(0x1000, Protection.EXECUTE_READWRITE);
+    try {
+      const f = addr;
+      const g = addr + 0x100n;
+      proc.writeBuffer(f, Buffer.from(RET_42));
+      proc.writeBuffer(g, Buffer.from(RET_99));
+      const h = proc.hook(f, g);
+      // second hook at the same src would steal our own E9 → refused cleanly.
+      expect(() => proc.hook(f, g)).toThrow(/relocat|position-relative|HOOK/i);
+      proc.unhook(h);
     } finally {
       proc.free(addr);
     }

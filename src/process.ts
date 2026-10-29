@@ -1,7 +1,9 @@
 import { writeFileSync } from 'node:fs';
 import { native } from './native.js';
 import {
+  MemoryProcessError,
   ProcessNotFoundError,
+  ProcessClosedError,
   AccessDeniedError,
   ReadError,
   WriteError,
@@ -156,6 +158,12 @@ function checkAddr(v: unknown, name = 'address'): asserts v is number | bigint {
 function checkStr(v: unknown, name: string): asserts v is string {
   if (typeof v !== 'string') throw new TypeError(`${name} must be a string`);
 }
+// A negative/NaN timeout reaches the native layer as a uint32 wrap → -1
+// becomes INFINITE and a SYNC wait bricks the event loop. Validate TS-side.
+function checkTimeout(v: number, name = 'timeoutMs'): void {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0)
+    throw new TypeError(`${name} must be a finite number >= 0`);
+}
 
 // Encode a typed little-endian value for value scans / writes.
 export function encodeValue(
@@ -252,16 +260,55 @@ function checkRel32(rel: bigint): void {
     );
 }
 
+/* ------------------------------------------------------------------ */
+/* Handle lifetime safety net                                          */
+/* ------------------------------------------------------------------ */
+// A `Process` that is dropped without close()/`using` would otherwise leak
+// its OpenProcess HANDLE for the host's lifetime. Two best-effort nets:
+//  1. FinalizationRegistry — closes the handle when the Process is GC'd.
+//     (NOT guaranteed to run, especially at exit — that's what #2 is for.)
+//  2. process.on('exit') — drains every still-open handle. Cheap and covers
+//     the "forgot to close then exited" path the registry can't.
+// `using` / explicit close() remain the recommended, deterministic path —
+// this is strictly a last-resort leak plug.
+const liveHandles = new Set<number>();
+const handleFinalizer = new FinalizationRegistry<number>((h) => {
+  liveHandles.delete(h);
+  try {
+    native.closeHandle(h);
+  } catch {
+    /* addon already torn down — nothing more we can do */
+  }
+});
+process.on('exit', () => {
+  for (const h of liveHandles) {
+    try {
+      native.closeHandle(h);
+    } catch {
+      /* best effort during teardown */
+    }
+  }
+  liveHandles.clear();
+});
+
 export class Process implements Disposable {
   #handle: number;
   readonly pid: number;
   // freeze()/watch() intervals — tracked so close() can kill them; otherwise
   // they keep polling handle 0 forever after close.
   #timers = new Set<ReturnType<typeof setInterval>>();
+  // Lazily-populated module table (basenames are lowercased). Module
+  // enumeration costs a full Toolhelp snapshot (~86µs); addr()/pointers()/
+  // Offsets hit it once per entry without this cache.
+  #modCache?: { list: ModuleInfo[]; byName: Map<string, ModuleInfo> };
 
   private constructor(handle: number, pid: number) {
     this.#handle = handle;
     this.pid = pid;
+    // Safety-net close on GC / host exit (see liveHandles above). The held
+    // value is the raw handle number — registering `this` would pin it.
+    liveHandles.add(handle);
+    handleFinalizer.register(this, handle, this);
   }
 
   /**
@@ -269,6 +316,12 @@ export class Process implements Disposable {
    * Default access is least-privilege VM_READ|VM_WRITE|VM_OPERATION|QUERY_INFORMATION.
    * Pass `{ access }` (or a raw access number) to override.
    * Throws ProcessNotFoundError / AccessDeniedError.
+   *
+   * NOTE — pid reuse: pids are recycled by Windows. Opening a recycled pid
+   * yields a handle on a DIFFERENT process. If identity matters, verify
+   * `module('expected.exe')` right after open.
+   * Prefer `using` or explicit close() — a GC'd Process relies on a
+   * best-effort FinalizationRegistry/exit sweep to release the handle.
    */
   static open(
     nameOrPid: string | number,
@@ -323,7 +376,7 @@ export class Process implements Disposable {
   }
 
   private assertOpen() {
-    if (!this.#handle) throw new Error('Process handle is closed');
+    if (!this.#handle) throw new ProcessClosedError();
   }
 
   // ---- reads ----
@@ -511,16 +564,49 @@ export class Process implements Disposable {
   }
 
   // ---- modules / regions ----
+  /**
+   * Loaded modules. The first call takes a Toolhelp snapshot (~86µs); the
+   * list is then cached per Process — {@link refreshModules} re-enumerates.
+   * The returned array is the cache itself: don't mutate it.
+   */
   modules(): ModuleInfo[] {
-    this.assertOpen();
-    return native.getModules(this.#handle, this.pid);
+    return this.#moduleTable().list;
   }
+
+  /**
+   * Look up a module by basename (case-insensitive). Served from the module
+   * cache; a cache MISS triggers ONE fresh enumeration before giving up, so
+   * polling `module('just-injected.dll')` in a loop still works.
+   */
   module(name: string): ModuleInfo | undefined {
     const want = name.toLowerCase();
-    return this.modules().find(
-      (m) => m.path.split(/[\\/]/).pop()!.toLowerCase() === want,
-    );
+    const hit = this.#moduleTable().byName.get(want);
+    if (hit) return hit;
+    // Miss → re-enumerate once (module may have loaded since first snapshot).
+    this.refreshModules();
+    return this.#moduleTable().byName.get(want);
   }
+
+  /**
+   * Clear the cached module table so the next modules()/module() call
+   * re-enumerates. Call after the target loads/unloads a DLL.
+   */
+  refreshModules(): void {
+    this.#modCache = undefined;
+  }
+
+  #moduleTable(): { list: ModuleInfo[]; byName: Map<string, ModuleInfo> } {
+    this.assertOpen();
+    if (!this.#modCache) {
+      const list = native.getModules(this.#handle, this.pid);
+      const byName = new Map<string, ModuleInfo>();
+      for (const m of list)
+        byName.set(m.path.split(/[\\/]/).pop()!.toLowerCase(), m);
+      this.#modCache = { list, byName };
+    }
+    return this.#modCache;
+  }
+
   regions(): Region[] {
     this.assertOpen();
     return native.getRegions(this.#handle);
@@ -563,30 +649,27 @@ export class Process implements Disposable {
     return native.protectMemory(this.#handle, Number(addr), size, protection);
   }
 
-  /** Write bytes that may live in a protected/code region: protect→write→restore→flush. */
+  /**
+   * Write bytes that may live in a protected/code region: per-region
+   * protect→write→restore→flush. Walks VirtualQueryEx across the whole span
+   * and restores EACH region's real old protection — a write spanning a
+   * protection boundary no longer flattens the second region to the first's.
+   */
   writeProtected(addr: number | bigint, data: Buffer | Uint8Array): boolean {
     this.assertOpen();
-    const old = this.protect(
-      addr,
-      data.length,
+    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    const r = native.writeProtectedMemory(
+      this.#handle,
+      Number(addr),
+      buf,
       Protection.PAGE_EXECUTE_READWRITE,
     );
-    try {
-      return this.writeBuffer(addr, data);
-    } finally {
-      // Best-effort restore: a failure here must not mask the write's real
-      // result. If it does fail the region stays RWX — warn so a weakening
-      // doesn't pass silently.
-      try {
-        this.protect(addr, data.length, old);
-        native.flushInstructions(this.#handle, Number(addr), data.length);
-      } catch (e: any) {
-        console.warn(
-          `memoryprocess: failed to restore protection at 0x${BigInt(addr).toString(16)} — region left RWX:`,
-          e?.message ?? e,
-        );
-      }
+    if (!r.restored) {
+      console.warn(
+        `memoryprocess: failed to restore protection at 0x${BigInt(addr).toString(16)} — part of the span left RWX`,
+      );
     }
+    return r.ok;
   }
   /** NOP `len` bytes at `addr` (0x90). */
   nop(addr: number | bigint, len: number): boolean {
@@ -650,14 +733,16 @@ export class Process implements Disposable {
     checkAddr(dst, 'dst');
     const s = BigInt(src),
       d = BigInt(dst);
-    const insns = this.disassemble(s, 16);
-    let stolenLen = 0;
-    for (const i of insns) {
-      stolenLen += i.size;
-      if (stolenLen >= 5) break;
-    }
-    if (stolenLen < 5) throw new WriteError(s);
-    const stolen = this.readBuffer(s, stolenLen);
+    // hookSteal refuses position-relative instructions (rel branches/calls,
+    // RIP-relative operands) that would execute at the wrong address when
+    // copied verbatim to the stub — this also cleanly rejects double-hooking
+    // (our own E9 patch decodes as position-relative). Throws HOOK_STEAL/
+    // HOOK_RELOCATE and returns the stolen bytes in one remote read.
+    const { length: stolenLen, bytes: stolen } = native.hookSteal(
+      this.#handle,
+      Number(s),
+      5,
+    );
 
     // The stub needs to reach `s` with a rel32 jmp-back, so it MUST land
     // within ±2GB of `src`. Hint VirtualAllocEx at candidate pages inside the
@@ -778,6 +863,10 @@ export class Process implements Disposable {
     timeoutMs = 10000,
   ): number | null {
     this.assertOpen();
+    checkTimeout(timeoutMs);
+    if (!(bytes instanceof Uint8Array))
+      throw new TypeError('bytes must be a Buffer or Uint8Array');
+    if (bytes.length === 0) throw new TypeError('bytes must not be empty');
     const addr = this.alloc(bytes.length, Protection.PAGE_EXECUTE_READWRITE);
     try {
       this.writeBuffer(addr, bytes);
@@ -797,10 +886,39 @@ export class Process implements Disposable {
   get pointerSize(): number {
     return this.isWow64 ? 4 : 8;
   }
-  /** Thread IDs owned by this process. */
+  /**
+   * Thread IDs owned by this process.
+   * COST: takes a Toolhelp snapshot of EVERY thread on the system and filters
+   * by pid — measured ~29ms on a busy desktop. Do not call per-frame; cache
+   * the result and treat it as a snapshot (new threads aren't included).
+   */
   threads(): number[] {
     this.assertOpen();
     return native.listThreads(this.pid);
+  }
+
+  /**
+   * Refuse to operate on a tid this process doesn't own — a typo'd tid would
+   * otherwise suspend/patch a thread in an UNRELATED process. An empty
+   * threads() list means the target is gone.
+   */
+  #assertOwnedTid(tid: number): void {
+    const tids = this.threads();
+    if (tids.length === 0) throw new ProcessNotFoundError(this.pid);
+    if (!tids.includes(tid))
+      throw new MemoryProcessError(
+        `tid ${tid} does not belong to pid ${this.pid}`,
+        'FOREIGN_TID',
+      );
+  }
+
+  /** Suspend a thread by id — no ownership check (internal fast path). */
+  #suspendRaw(tid: number): boolean {
+    return native.suspendThread(tid);
+  }
+  /** Resume a thread by id — no ownership check (internal fast path). */
+  #resumeRaw(tid: number): boolean {
+    return native.resumeThread(tid);
   }
   /**
    * First thread reported by the Toolhelp snapshot for this process — in
@@ -811,35 +929,55 @@ export class Process implements Disposable {
     this.assertOpen();
     return this.threads()[0] ?? null;
   }
-  /** Suspend a thread by id. */
+  /** Suspend a thread by id. `tid` must belong to this process. */
   suspendThread(tid: number): boolean {
     this.assertOpen();
     checkNumber(tid, 'tid');
-    return native.suspendThread(tid);
+    this.#assertOwnedTid(tid);
+    return this.#suspendRaw(tid);
   }
-  /** Resume a thread by id. */
+  /** Resume a thread by id. `tid` must belong to this process. */
   resumeThread(tid: number): boolean {
     this.assertOpen();
     checkNumber(tid, 'tid');
-    return native.resumeThread(tid);
+    this.#assertOwnedTid(tid);
+    return this.#resumeRaw(tid);
   }
-  /** Suspend all threads of this process (for atomic patching). */
+  /**
+   * Suspend all threads of this process (for atomic patching). Refuses when
+   * the target IS this process — suspending the caller deadlocks the host.
+   */
   suspendAll(): number[] {
+    if (this.pid === process.pid)
+      throw new MemoryProcessError(
+        'cannot suspendAll on own process — self-deadlock',
+        'SELF_SUSPEND',
+      );
     const t = this.threads();
-    t.forEach((id) => this.suspendThread(id));
+    const self = native.currentThreadId();
+    t.filter((id) => id !== self).forEach((id) => this.#suspendRaw(id));
     return t;
   }
   /** Resume all threads of this process. */
   resumeAll(): void {
-    this.threads().forEach((id) => this.resumeThread(id));
+    const self = native.currentThreadId();
+    this.threads()
+      .filter((id) => id !== self)
+      .forEach((id) => this.#resumeRaw(id));
   }
   /**
    * Suspend the whole process atomically via NtSuspendProcess — preferred over
    * {@link suspendAll} which races with new-thread creation. Pair with
-   * {@link resumeProcess}.
+   * {@link resumeProcess}. Refuses when the target IS this process
+   * (self-deadlock).
    */
   suspendProcess(): boolean {
     this.assertOpen();
+    if (this.pid === process.pid)
+      throw new MemoryProcessError(
+        'cannot suspendProcess on own process — self-deadlock',
+        'SELF_SUSPEND',
+      );
     return native.suspendProcess(this.pid);
   }
   /** Resume a process suspended by {@link suspendProcess}. */
@@ -887,6 +1025,12 @@ export class Process implements Disposable {
   getThreadContext(tid: number): ThreadContext | null {
     this.assertOpen();
     checkNumber(tid, 'tid');
+    this.#assertOwnedTid(tid);
+    return this.#getCtxRaw(tid);
+  }
+
+  /** Context read without tid-ownership re-validation (internal). */
+  #getCtxRaw(tid: number): ThreadContext | null {
     return native.getThreadContext(tid);
   }
 
@@ -903,6 +1047,15 @@ export class Process implements Disposable {
     checkNumber(tid, 'tid');
     if (ctx === null || typeof ctx !== 'object')
       throw new TypeError('ctx must be an object');
+    this.#assertOwnedTid(tid);
+    return this.#setCtxRaw(tid, ctx);
+  }
+
+  /** Context write without tid-ownership re-validation (internal). */
+  #setCtxRaw(
+    tid: number,
+    ctx: Partial<Record<keyof ThreadContext, number | bigint>>,
+  ): boolean {
     return native.setThreadContext(tid, ctx);
   }
 
@@ -918,6 +1071,7 @@ export class Process implements Disposable {
   ): number | null {
     this.assertOpen();
     checkAddr(fnAddr, 'fnAddr');
+    checkTimeout(timeoutMs);
     return native.callRemote(this.pid, fnAddr, param, timeoutMs);
   }
 
@@ -956,7 +1110,8 @@ export class Process implements Disposable {
             : (() => {
                 throw new TypeError(`unknown breakpoint kind ${kind}`);
               })();
-    const ctx = this.getThreadContext(tid);
+    this.#assertOwnedTid(tid);
+    const ctx = this.#getCtxRaw(tid);
     if (!ctx) return false;
     // Intel Dr7 LEN encoding: 00=1 byte, 01=2, 11=4, 10=8 (exec forces 00)
     const lenBits =
@@ -976,7 +1131,7 @@ export class Process implements Disposable {
     dr7 |= 1n << BigInt(slot * 2); // local enable L{slot}
     const patch: Record<string, bigint> = { dr7 };
     patch[`dr${slot}`] = BigInt(addr);
-    return this.setThreadContext(tid, patch);
+    return this.#setCtxRaw(tid, patch);
   }
 
   /** Clear Dr{slot} (address + enable/RW/LEN bits in Dr7) on thread `tid`. */
@@ -984,7 +1139,8 @@ export class Process implements Disposable {
     this.assertOpen();
     if (!Number.isInteger(slot) || slot < 0 || slot > 3)
       throw new RangeError('slot must be 0..3');
-    const ctx = this.getThreadContext(tid);
+    this.#assertOwnedTid(tid);
+    const ctx = this.#getCtxRaw(tid);
     if (!ctx) return false;
     const shift = BigInt(16 + slot * 4);
     let dr7 = ctx.dr7;
@@ -992,7 +1148,7 @@ export class Process implements Disposable {
     dr7 &= ~(3n << BigInt(slot * 2)); // clear local+global enable
     const patch: Record<string, bigint> = { dr7 };
     patch[`dr${slot}`] = 0n;
-    return this.setThreadContext(tid, patch);
+    return this.#setCtxRaw(tid, patch);
   }
 
   /**
@@ -1358,6 +1514,11 @@ export class Process implements Disposable {
    * addresses whose current value still equals `value` (or falls inside
    * `opts.range = [lo, hi]` — CE "value between"). Reads are batched one
    * readSafe per 4KB page group, so it's fast on large hit lists.
+   *
+   * NOTE — close() mid-scan: a page whose read fails (incl. the process
+   * handle closing between batches) is silently SKIPPED, so a late close()
+   * can yield a partial/empty result instead of an error. Check `handle`
+   * after awaiting if that distinction matters.
    */
   async nextScan(
     hits: readonly bigint[],
@@ -1441,6 +1602,10 @@ export class Process implements Disposable {
    * Freeze a remote value: writes `value` at `addr` every `intervalMs`.
    * Returns an unfreeze function. Write failures are ignored (target may
    * exit); call the returned function (or close()) to stop.
+   *
+   * Lifecycle: the timer is `unref()`'d (won't keep the host alive) and holds
+   * only a `WeakRef` to this Process — a dropped Process self-clears the
+   * interval on the next tick instead of polling a leaked handle forever.
    */
   freeze(
     addr: number | bigint,
@@ -1451,18 +1616,24 @@ export class Process implements Disposable {
     this.assertOpen();
     checkAddr(addr);
     if (!(type in VALUE_WIDTHS)) throw new TypeError(`unknown type ${type}`);
+    checkTimeout(intervalMs, 'intervalMs');
+    // Capture only what the timer needs — a closure over `this` would keep
+    // the Process (and its OS handle) alive as long as the interval runs.
+    const timers = this.#timers;
+    const self = new WeakRef(this);
     const stop = () => {
       clearInterval(timer);
-      this.#timers.delete(timer);
+      timers.delete(timer);
     };
     const timer = setInterval(() => {
-      if (!this.#handle) {
+      const p = self.deref();
+      if (!p || !p.#handle) {
         stop();
         return;
-      } // self-clear after close()
+      } // Process GC'd or closed — self-clear
       try {
         native.writeValue(
-          this.#handle,
+          p.#handle,
           Number(addr),
           type,
           type === 'int64' || type === 'uint64' ? BigInt(value) : value,
@@ -1472,7 +1643,7 @@ export class Process implements Disposable {
       }
     }, intervalMs);
     if (typeof timer.unref === 'function') timer.unref();
-    this.#timers.add(timer);
+    timers.add(timer);
     return stop;
   }
 
@@ -1496,13 +1667,17 @@ export class Process implements Disposable {
   /**
    * Inject `absolutePath` (a DLL) into this process via LoadLibraryA on a remote
    * thread. Re-opens the process internally with the required rights.
-   * Throws InjectError on failure.
+   * Throws InjectError on failure. `timeoutMs` bounds the remote-thread wait
+   * when the native layer supports it.
    */
-  injectDll(absolutePath: string): boolean {
+  injectDll(absolutePath: string, timeoutMs?: number): boolean {
     this.assertOpen();
     checkStr(absolutePath, 'dllPath');
+    if (timeoutMs !== undefined) checkTimeout(timeoutMs);
     try {
-      return native.injectDll(this.pid, absolutePath);
+      const ok = native.injectDll(this.pid, absolutePath, timeoutMs);
+      if (ok) this.refreshModules(); // module table changed — drop stale cache
+      return ok;
     } catch (e: any) {
       throw new InjectError(e?.message ?? 'unknown', e?.win32code);
     }
@@ -1510,25 +1685,32 @@ export class Process implements Disposable {
 
   /**
    * Eject a loaded module via FreeLibrary on a remote thread. Accepts a
-   * ModuleInfo or a substring matched (case-insensitive) against module names.
-   * Throws InjectError on failure / no match.
+   * ModuleInfo or an EXACT module basename (case-insensitive, e.g.
+   * 'testdll.dll') — substrings are rejected so 'd3d' can't unload
+   * 'd3dcompiler_47.dll'. Always re-enumerates first: the module cache would
+   * otherwise hand a stale base to FreeLibrary. Throws InjectError on
+   * failure / no match.
    */
   ejectDll(module: ModuleInfo | string): boolean {
     this.assertOpen();
     let base: number | undefined;
     if (typeof module === 'string') {
+      checkStr(module, 'module');
+      this.refreshModules(); // stale cache → wrong base / false "not found"
       const want = module.toLowerCase();
-      const m = this.modules().find((m) => {
-        const name = m.path.split(/[\\/]/).pop()!.toLowerCase();
-        return name.includes(want);
-      });
-      if (!m) throw new InjectError(`module not found: ${module}`);
+      const m = this.#moduleTable().byName.get(want);
+      if (!m)
+        throw new InjectError(
+          `module not found: ${module} (exact basename required)`,
+        );
       base = m.base;
     } else {
       base = module.base;
     }
     try {
-      return native.ejectDll(this.pid, base);
+      const ok = native.ejectDll(this.pid, base);
+      if (ok) this.refreshModules(); // module unloaded — drop stale cache
+      return ok;
     } catch (e: any) {
       throw new InjectError(e?.message ?? 'unknown', e?.win32code);
     }
@@ -1539,31 +1721,52 @@ export class Process implements Disposable {
    * Poll `readInt32` at `addr` every `intervalMs`; invoke `cb(newVal, oldVal)`
    * on change. Returns an unsubscribe function. Read failures are ignored
    * (the target may exit or the page may become inaccessible).
+   *
+   * A throwing `cb` is forwarded to `opts.onError`; the default handler logs
+   * via console.error and keeps the watcher running — a user-callback fault
+   * must not crash the process or spam unhandled rejections. Pass
+   * `onError: () => {}` to silence it.
+   *
+   * Lifecycle: the timer is `unref()`'d (won't keep the host alive) and holds
+   * only a `WeakRef` to this Process — a dropped Process self-clears the
+   * interval on the next tick instead of polling a leaked handle forever.
    */
   watch(
     addr: number | bigint,
     cb: (newVal: number, oldVal: number) => void,
     intervalMs = 50,
+    opts: { onError?: (err: unknown) => void } = {},
   ): () => void {
     this.assertOpen();
+    checkAddr(addr);
+    checkTimeout(intervalMs, 'intervalMs');
+    if (typeof cb !== 'function') throw new TypeError('cb must be a function');
+    const onError =
+      opts.onError ??
+      ((e: unknown) =>
+        console.error('memoryprocess: watch callback threw:', e));
     let prev: number | undefined;
     try {
       prev = this.readInt32(addr);
     } catch {
       /* start uninitialized */
     }
+    // WeakRef + no `this` capture — see freeze() for the rationale.
+    const timers = this.#timers;
+    const self = new WeakRef(this);
     const stop = () => {
       clearInterval(timer);
-      this.#timers.delete(timer);
+      timers.delete(timer);
     };
     const timer = setInterval(() => {
-      if (!this.#handle) {
+      const p = self.deref();
+      if (!p || !p.#handle) {
         stop();
         return;
-      } // self-clear after close()
+      } // Process GC'd or closed — self-clear
       let cur: number;
       try {
-        cur = this.readInt32(addr);
+        cur = p.readInt32(addr);
       } catch {
         return;
       }
@@ -1571,28 +1774,34 @@ export class Process implements Disposable {
         const old = prev;
         prev = cur;
         if (old !== undefined) {
-          // Swallow callback exceptions — a throwing user cb inside a
-          // setInterval must not crash the process or spam unhandled errors.
           try {
             cb(cur, old);
-          } catch {
-            /* user callback fault */
+          } catch (e) {
+            onError(e);
           }
         }
       }
     }, intervalMs);
     if (typeof timer.unref === 'function') timer.unref();
-    this.#timers.add(timer);
+    timers.add(timer);
     return stop;
   }
 
-  /** Close the process handle. Idempotent; also stops freeze()/watch() timers. */
+  /**
+   * Close the process handle. Idempotent; also stops freeze()/watch() timers.
+   * After close every member throws {@link ProcessClosedError}.
+   */
   close(): void {
     for (const t of this.#timers) clearInterval(t);
     this.#timers.clear();
     if (this.#handle) {
-      native.closeHandle(this.#handle);
+      const h = this.#handle;
       this.#handle = 0;
+      // Remove the safety-net entry so a GC'd/closed Process can't be
+      // double-closed via the finalizer or the exit sweep.
+      liveHandles.delete(h);
+      handleFinalizer.unregister(this);
+      native.closeHandle(h);
     }
   }
 

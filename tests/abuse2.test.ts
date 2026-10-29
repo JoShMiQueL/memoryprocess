@@ -377,9 +377,12 @@ describe('thread/context abuse', () => {
       proc.hwBreakpoint(tid, victim.addr.g_i32, 0, 3 as any),
     ).toThrow(RangeError);
   });
-  test('getThreadContext(0) → null', () => {
+  test('getThreadContext(0) → throws FOREIGN_TID (was: null)', () => {
     using proc = Process.open(victim.pid);
-    expect(proc.getThreadContext(0)).toBeNull();
+    // H5 fix: tid 0 doesn't belong to the target — rejected, not null-queried.
+    expect(() => proc.getThreadContext(0)).toThrow(
+      /FOREIGN_TID|does not belong/,
+    );
   });
   test('suspendThread(0x7fffffff) → false or throw', () => {
     using proc = Process.open(victim.pid);

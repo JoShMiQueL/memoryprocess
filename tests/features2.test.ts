@@ -51,7 +51,7 @@ describe('injectDll / ejectDll', () => {
     expect(found).toBe(true);
     expect(proc.module('testdll.dll')).toBeDefined();
 
-    expect(proc.ejectDll('testdll')).toBe(true);
+    expect(proc.ejectDll('testdll.dll')).toBe(true);
     let gone = false;
     for (let i = 0; i < 40 && !gone; i++) {
       await Bun.sleep(50);

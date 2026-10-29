@@ -3,6 +3,7 @@
 #include <system_error>
 #include <tlhelp32.h>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <string>
 extern "C" {
@@ -232,11 +233,23 @@ Napi::Value SuspendThreadSync(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   if (info.Length() < 1 || !info[0].IsNumber()) { Napi::TypeError::New(env, "expected tid").ThrowAsJavaScriptException(); return env.Null(); }
   DWORD tid = info[0].As<Napi::Number>().Uint32Value();
+  // QA4-C3: suspending OUR OWN thread from a sync binding freezes the JS
+  // engine mid-call — it can never reach resumeThread (unrecoverable
+  // deadlock). Refuse silently (false) so suspendAll() on the caller's own
+  // pid skips the calling thread instead of hanging.
+  if (tid == GetCurrentThreadId()) return Napi::Boolean::New(env, false);
   HANDLE t = OpenThread(THREAD_SUSPEND_RESUME, FALSE, tid);
   if (!t) return Napi::Boolean::New(env, false);
   DWORD r = SuspendThread(t);
   CloseHandle(t);
   return Napi::Boolean::New(env, r != (DWORD)-1);
+}
+
+// currentThreadId() -> number
+// Exported so the TS suspendAll() can skip the calling thread explicitly.
+Napi::Value CurrentThreadIdSync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  return Napi::Number::New(env, static_cast<double>(GetCurrentThreadId()));
 }
 
 Napi::Value ResumeThreadSync(const Napi::CallbackInfo& info) {
@@ -369,6 +382,102 @@ Napi::Value FlushInstructionsSync(const Napi::CallbackInfo& info) {
     FlushInstructionCache(h, reinterpret_cast<LPCVOID>(addr), size) != 0);
 }
 
+// writeProtectedMemory(handle, address, buffer[, protection]) -> boolean
+// QA4-M1: the old TS flow did protect(addr,len)->oldProt(first page only)->
+// write->protect(addr,len,oldProt) — a write spanning a protection boundary
+// restored EVERY page in the span to the first page's old protection,
+// silently changing protections on the second region. This native
+// implementation walks VirtualQueryEx over the write span, records each
+// region's real old protection, unprotects the whole span, writes, then
+// restores each region individually. Single-region writes keep identical
+// behavior. Restore failures are reported via the `restored` flag — a
+// restored=false result means part of the span is left at `protection`.
+Napi::Value WriteProtectedMemorySync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 3 || !info[0].IsNumber() || !info[1].IsNumber()) {
+    Napi::TypeError::New(env, "expected (handle,address,buffer[,protection])")
+        .ThrowAsJavaScriptException();
+    return env.Null();
+  }
+  HANDLE h = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(info[0].As<Napi::Number>().DoubleValue()));
+  auto addr = static_cast<std::uintptr_t>(info[1].As<Napi::Number>().DoubleValue());
+  if (!info[2].IsBuffer()) {
+    Napi::TypeError::New(env, "value must be a Buffer").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+  auto buf = info[2].As<Napi::Buffer<std::uint8_t>>();
+  DWORD newProt = PAGE_EXECUTE_READWRITE;
+  if (info.Length() > 3 && info[3].IsNumber())
+    newProt = info[3].As<Napi::Number>().Uint32Value();
+  if (buf.Length() == 0) {
+    // Nothing to do — return the same result shape as a real write.
+    auto o = Napi::Object::New(env);
+    o.Set("ok", Napi::Boolean::New(env, true));
+    o.Set("restored", Napi::Boolean::New(env, true));
+    o.Set("protected", Napi::Boolean::New(env, true));
+    return o;
+  }
+
+  // QA4-M1: record per-region old protection across the whole write span
+  // BEFORE unprotecting — VirtualProtectEx only reports the first page's
+  // old value, so the query walk is the only correct source.
+  struct RegionSnap { std::uintptr_t base; std::uintptr_t end; DWORD oldProt; };
+  std::vector<RegionSnap> regions;
+  const std::uintptr_t end = addr + buf.Length();
+  {
+    std::uintptr_t cur = addr;
+    while (cur < end) {
+      MEMORY_BASIC_INFORMATION mbi{};
+      if (!VirtualQueryEx(h, reinterpret_cast<LPCVOID>(cur), &mbi, sizeof(mbi)) ||
+          mbi.State != MEM_COMMIT || mbi.RegionSize == 0) {
+        auto e = Napi::Error::New(env, "VirtualQueryEx failed or region not committed");
+        e.Set("code", "PROTECT_FAILED");
+        e.Set("win32code", Napi::Number::New(env, (double)GetLastError()));
+        e.ThrowAsJavaScriptException();
+        return env.Null();
+      }
+      std::uintptr_t rBase = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
+      std::uintptr_t rEnd = rBase + mbi.RegionSize;
+      regions.push_back({ rBase < cur ? cur : rBase,
+                          rEnd > end ? end : rEnd, mbi.Protect });
+      cur = rEnd;
+    }
+  }
+
+  // Unprotect each region span (VirtualProtectEx clamps to whole pages, which
+  // is fine — only pages intersecting [addr,end) are touched).
+  bool allProtected = true;
+  for (const auto& r : regions) {
+    DWORD old = 0;
+    if (!VirtualProtectEx(h, reinterpret_cast<LPVOID>(r.base), r.end - r.base,
+                          newProt, &old)) {
+      allProtected = false; // continue — best effort
+    }
+  }
+
+  SIZE_T written = 0;
+  const bool wrote = WriteProcessMemory(
+      h, reinterpret_cast<LPVOID>(addr), buf.Data(), buf.Length(), &written) &&
+      written == buf.Length();
+
+  // Restore each region to ITS recorded protection (not the first page's).
+  bool allRestored = true;
+  for (const auto& r : regions) {
+    DWORD old = 0;
+    if (!VirtualProtectEx(h, reinterpret_cast<LPVOID>(r.base), r.end - r.base,
+                          r.oldProt, &old)) {
+      allRestored = false;
+    }
+  }
+  FlushInstructionCache(h, reinterpret_cast<LPCVOID>(addr), buf.Length());
+
+  auto o = Napi::Object::New(env);
+  o.Set("ok", Napi::Boolean::New(env, wrote));
+  o.Set("restored", Napi::Boolean::New(env, allRestored));
+  o.Set("protected", Napi::Boolean::New(env, allProtected));
+  return o;
+}
+
 static void ThrowInject(Napi::Env env, const char* what, DWORD code) {
   auto err = Napi::Error::New(env, what);
   err.Set("code", "INJECT_FAILED");
@@ -377,6 +486,20 @@ static void ThrowInject(Napi::Env env, const char* what, DWORD code) {
 }
 
 // injectDll(pid, dllPath) -> boolean
+// QA4-M2: dllPath must be ABSOLUTE. A relative name resolves against the
+// TARGET's cwd + DLL search order — a DLL-planting primitive when that cwd is
+// attacker-writable. Reject anything that isn't `X:\...` or a `\\` UNC path.
+// QA4-M2 also: the path is written UTF-16LE and LoadLibraryW is used — the
+// old LoadLibraryA path mangled non-ANSI filenames per the target's codepage.
+static bool IsAbsolutePath(const std::string& p) {
+  if (p.size() >= 3 && ((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')) &&
+      p[1] == ':' && (p[2] == '\\' || p[2] == '/'))
+    return true;                                    // X:\...
+  if (p.size() >= 2 && p[0] == '\\' && p[1] == '\\')
+    return true;                                    // \\server\share or \\?\...
+  return false;
+}
+
 Napi::Value InjectDllSync(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   if (info.Length() < 2 || !info[0].IsNumber() || !info[1].IsString()) {
@@ -385,12 +508,40 @@ Napi::Value InjectDllSync(const Napi::CallbackInfo& info) {
   }
   DWORD pid = info[0].As<Napi::Number>().Uint32Value();
   std::string path = info[1].As<Napi::String>().Utf8Value();
+  if (!IsAbsolutePath(path)) {
+    ThrowInject(env, "dllPath must be an absolute path (X:\\... or \\\\UNC)", ERROR_INVALID_NAME);
+    return env.Null();
+  }
+  if (path.size() > 32767) {
+    ThrowInject(env, "dllPath exceeds maximum NT path length (32767)", ERROR_FILENAME_EXCED_RANGE);
+    return env.Null();
+  }
+  // Optional 3rd arg: remote-thread wait timeout (bounded — a negative or
+  // huge value would wrap DWORD into an ~infinite sync wait, QA4-H1).
+  DWORD waitMs = 10000;
+  if (info.Length() > 2 && info[2].IsNumber()) {
+    double t = info[2].As<Napi::Number>().DoubleValue();
+    if (!std::isfinite(t) || t < 0 || t > 60000) {
+      Napi::RangeError::New(env, "timeoutMs must be a finite number in [0, 60000]")
+          .ThrowAsJavaScriptException();
+      return env.Null();
+    }
+    waitMs = static_cast<DWORD>(t);
+  }
+  // UTF-8 -> UTF-16LE for LoadLibraryW.
+  std::wstring wpath;
+  {
+    int n = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
+    if (n <= 0) { ThrowInject(env, "dllPath is not valid UTF-8", ERROR_NO_UNICODE_TRANSLATION); return env.Null(); }
+    wpath.assign(static_cast<size_t>(n) - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, wpath.data(), n);
+  }
   const DWORD access = PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION |
                        PROCESS_VM_WRITE | PROCESS_VM_READ | PROCESS_QUERY_INFORMATION;
   HANDLE h = OpenProcess(access, FALSE, pid);
   if (!h) { ThrowInject(env, "OpenProcess failed", GetLastError()); return env.Null(); }
 
-  // WoW64 targets load a 32-bit kernel32 at a different base — LoadLibraryA
+  // WoW64 targets load a 32-bit kernel32 at a different base — LoadLibraryW
   // resolved in *our* (x64) process would be the wrong address. Refuse rather
   // than silently corrupting the target.
   {
@@ -405,24 +556,25 @@ Napi::Value InjectDllSync(const Napi::CallbackInfo& info) {
 
   bool ok = false;
   do {
-    LPVOID remote = VirtualAllocEx(h, nullptr, path.size() + 1,
+    const SIZE_T wbytes = (wpath.size() + 1) * sizeof(wchar_t);
+    LPVOID remote = VirtualAllocEx(h, nullptr, wbytes,
                                    MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!remote) { DWORD e = GetLastError(); ThrowInject(env, "VirtualAllocEx failed", e); break; }
     SIZE_T w = 0;
-    if (!WriteProcessMemory(h, remote, path.c_str(), path.size() + 1, &w)) {
+    if (!WriteProcessMemory(h, remote, wpath.c_str(), wbytes, &w)) {
       DWORD e = GetLastError();
       VirtualFreeEx(h, remote, 0, MEM_RELEASE);
       ThrowInject(env, "WriteProcessMemory failed", e); break;
     }
     // NOTE: kernel32 is loaded at the same base in every x64 process, so this
-    // locally-resolved LoadLibraryA address is valid in the target. This holds
+    // locally-resolved LoadLibraryW address is valid in the target. This holds
     // because kernel32 is a KnownDll mapped at a shared ASLR base.
-    HMODULE k32 = GetModuleHandleA("kernel32.dll");
-    FARPROC loadLib = k32 ? GetProcAddress(k32, "LoadLibraryA") : nullptr;
+    HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
+    FARPROC loadLib = k32 ? GetProcAddress(k32, "LoadLibraryW") : nullptr;
     if (!loadLib) {
       DWORD e = GetLastError();
       VirtualFreeEx(h, remote, 0, MEM_RELEASE);
-      ThrowInject(env, "LoadLibraryA resolution failed", e); break;
+      ThrowInject(env, "LoadLibraryW resolution failed", e); break;
     }
     HANDLE t = CreateRemoteThread(h, nullptr, 0,
         reinterpret_cast<LPTHREAD_START_ROUTINE>(loadLib), remote, 0, nullptr);
@@ -431,24 +583,28 @@ Napi::Value InjectDllSync(const Napi::CallbackInfo& info) {
       VirtualFreeEx(h, remote, 0, MEM_RELEASE);
       ThrowInject(env, "CreateRemoteThread failed", e); break;
     }
-    DWORD wr = WaitForSingleObject(t, 10000);
+    DWORD wr = WaitForSingleObject(t, waitMs);
     if (wr != WAIT_OBJECT_0) {
-      // Thread still running (or failed): terminate it before freeing `remote`
-      // so it can't read freed memory mid-LoadLibrary.
-      TerminateThread(t, 0);
+      // QA4-C1: do NOT TerminateThread here. TerminateThread is asynchronous
+      // and killing a thread inside LoadLibraryW can leave the target's
+      // loader lock permanently held — every subsequent LoadLibrary /
+      // thread-creation in the victim deadlocks. Instead we close our handle
+      // and deliberately LEAK the small path buffer so a late-finishing
+      // thread never reads freed memory. Bounded leak ≤64KB; a wedged target
+      // is worse.
       CloseHandle(t);
-      VirtualFreeEx(h, remote, 0, MEM_RELEASE);
-      ThrowInject(env, "LoadLibraryA remote thread timed out", wr == WAIT_FAILED ? GetLastError() : ERROR_TIMEOUT);
+      ThrowInject(env, "LoadLibraryW remote thread timed out (leaked path buffer; target not terminated to avoid loader-lock deadlock)",
+                  wr == WAIT_FAILED ? GetLastError() : ERROR_TIMEOUT);
       break;
     }
     DWORD exitCode = 0;
     GetExitCodeThread(t, &exitCode);
     CloseHandle(t);
     VirtualFreeEx(h, remote, 0, MEM_RELEASE);
-    // LoadLibraryA returns the module HMODULE as the thread exit code; 0 means
+    // LoadLibraryW returns the module HMODULE as the thread exit code; 0 means
     // the DLL failed to load (not found, bad bitness, missing dependency).
     if (exitCode == 0) {
-      ThrowInject(env, "LoadLibraryA returned NULL in target", ERROR_MOD_NOT_FOUND);
+      ThrowInject(env, "LoadLibraryW returned NULL in target", ERROR_MOD_NOT_FOUND);
       break;
     }
     ok = true;
@@ -472,9 +628,22 @@ Napi::Value EjectDllSync(const Napi::CallbackInfo& info) {
   HANDLE h = OpenProcess(access, FALSE, pid);
   if (!h) { ThrowInject(env, "OpenProcess failed", GetLastError()); return env.Null(); }
 
+  // QA4-C4: same WoW64 guard as injectDll — our 64-bit FreeLibrary address is
+  // meaningless inside a 32-bit target's address space; the remote thread
+  // would execute a wild pointer.
+  {
+    BOOL wow = FALSE;
+    IsWow64Process(h, &wow);
+    if (wow) {
+      CloseHandle(h);
+      ThrowInject(env, "ejectDll does not support WoW64 (32-bit) targets", ERROR_NOT_SUPPORTED);
+      return env.Null();
+    }
+  }
+
   bool ok = false;
   do {
-    HMODULE k32 = GetModuleHandleA("kernel32.dll");
+    HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
     FARPROC freeLib = k32 ? GetProcAddress(k32, "FreeLibrary") : nullptr;
     if (!freeLib) { ThrowInject(env, "FreeLibrary resolution failed", GetLastError()); break; }
     HANDLE t = CreateRemoteThread(h, nullptr, 0,
@@ -483,12 +652,25 @@ Napi::Value EjectDllSync(const Napi::CallbackInfo& info) {
     if (!t) { ThrowInject(env, "CreateRemoteThread failed", GetLastError()); break; }
     DWORD wr = WaitForSingleObject(t, 10000);
     if (wr != WAIT_OBJECT_0) {
-      TerminateThread(t, 0);
+      // QA4-C1: never TerminateThread inside FreeLibrary — the remote thread
+      // can hold the loader lock; killing it wedges the target permanently.
+      // Just close our handle and report the timeout.
       CloseHandle(t);
-      ThrowInject(env, "FreeLibrary remote thread timed out", wr == WAIT_FAILED ? GetLastError() : ERROR_TIMEOUT);
+      ThrowInject(env, "FreeLibrary remote thread timed out (target thread left running to avoid loader-lock deadlock)",
+                  wr == WAIT_FAILED ? GetLastError() : ERROR_TIMEOUT);
       break;
     }
+    // QA4-C4: FreeLibrary returns BOOL as the thread exit code — verify it.
+    // Without this check, ejecting kernel32/main.exe/garbage bases reported
+    // success while nothing (or worse, the wrong thing) happened.
+    DWORD exitCode = 0;
+    GetExitCodeThread(t, &exitCode);
     CloseHandle(t);
+    if (exitCode == 0) {
+      ThrowInject(env, "FreeLibrary returned FALSE in target (bad/foreign module base or refcount pinned)",
+                  ERROR_MOD_NOT_FOUND);
+      break;
+    }
     ok = true;
   } while (0);
   CloseHandle(h);
@@ -622,8 +804,18 @@ Napi::Value CallRemoteSync(const Napi::CallbackInfo& info) {
     return env.Null();
   }
   DWORD timeout = 10000;
-  if (info.Length() > 3 && info[3].IsNumber())
-    timeout = info[3].As<Napi::Number>().Uint32Value();
+  if (info.Length() > 3 && info[3].IsNumber()) {
+    // QA4-H1: Uint32Value() on -1 wraps to 0xFFFFFFFF = INFINITE — a sync
+    // binding that never returns bricks the whole JS process. Clamp to a
+    // bounded range; negative/non-finite values are a caller bug.
+    double t = info[3].As<Napi::Number>().DoubleValue();
+    if (!std::isfinite(t) || t < 0 || t > 60000) {
+      Napi::RangeError::New(env, "timeoutMs must be a finite number in [0, 60000]")
+          .ThrowAsJavaScriptException();
+      return env.Null();
+    }
+    timeout = static_cast<DWORD>(t);
+  }
 
   HANDLE h = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION, FALSE, pid);
   if (!h) return env.Null();
@@ -633,10 +825,21 @@ Napi::Value CallRemoteSync(const Napi::CallbackInfo& info) {
   if (!t) { CloseHandle(h); return env.Null(); }
   DWORD wr = WaitForSingleObject(t, timeout);
   DWORD code = 0;
-  // On timeout the remote thread is terminated before we return null, so the
-  // caller can safely free any memory the thread was executing in
-  // (execShellcode relies on this).
-  if (wr != WAIT_OBJECT_0) { TerminateThread(t, 0); CloseHandle(t); CloseHandle(h); return env.Null(); }
+  // QA4-C1: TerminateThread is asynchronous — it only *requests* termination.
+  // Returning immediately after TerminateThread lets the caller (execShellcode
+  // finally-block, injectDll) free memory the zombie thread may still be
+  // executing in. Wait for the thread object itself to be signaled (max 2s)
+  // so a timeout-return really means the thread is dead. NOTE: terminating a
+  // thread that was mid-LoadLibrary can still leave the target's loader lock
+  // held — an inherent TerminateThread hazard; callers needing guaranteed
+  // non-wedging behavior should prefer a longer timeout over termination.
+  if (wr != WAIT_OBJECT_0) {
+    TerminateThread(t, 0);
+    WaitForSingleObject(t, 2000);
+    CloseHandle(t);
+    CloseHandle(h);
+    return env.Null();
+  }
   bool ok = GetExitCodeThread(t, &code) != 0;
   CloseHandle(t);
   CloseHandle(h);
@@ -692,11 +895,115 @@ Napi::Value DisasmInstructionsSync(const Napi::CallbackInfo& info) {
     auto o = Napi::Object::New(env);
     o.Set("offset", Napi::Number::New(env, static_cast<double>(off)));
     o.Set("length", Napi::Number::New(env, static_cast<double>(len)));
+    // QA4-C2: expose position-dependence so callers (hook) can refuse to copy
+    // the instruction to a differently-based trampoline. F_RELATIVE covers
+    // rel8/16/32 branch+call immediates (E8/E9/EB, 70-7F, 0F 8x, E0-E3, xbegin).
+    // A ModRM mod=00 rm=101 encoding is RIP-relative ([rip+disp32]).
+    const bool ripRel = (hs.flags & F_MODRM) && hs.modrm_mod == 0 &&
+                        hs.modrm_rm == 5;
+    o.Set("relative",
+          Napi::Boolean::New(env, (hs.flags & F_RELATIVE) != 0 || ripRel));
     arr.Set(n, o);
     off += len;
     n++;
   }
   return arr;
+}
+
+// hookSteal(handle, address[, minBytes]) -> { length, bytes:Buffer }
+// QA4-C2: the TS trampoline hook copies stolen instructions VERBATIM into a
+// stub at a different address — any position-relative instruction in the
+// stolen set (rel branches/calls whose immediates are pc-relative, or
+// RIP-relative memory operands) silently jumps to / references the WRONG
+// address when executed from the stub. MinHook solves this by relocating;
+// until we implement relocation we REFUSE to steal such instructions.
+// This also cleanly rejects double-hooking `src` — our own E9 patch decodes
+// as a position-relative instruction.
+// Throws HOOK_STEAL when <minBytes of decodable instructions exist, or
+// HOOK_RELOCATE naming the offending opcode/offset. Returns the stolen bytes
+// so the caller doesn't need a second remote read.
+Napi::Value HookStealSync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 2 || !info[0].IsNumber() || !info[1].IsNumber()) {
+    Napi::TypeError::New(env, "expected (handle, address[, minBytes])")
+        .ThrowAsJavaScriptException();
+    return env.Null();
+  }
+  HANDLE h = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(info[0].As<Napi::Number>().DoubleValue()));
+  auto addr = static_cast<std::uintptr_t>(info[1].As<Napi::Number>().DoubleValue());
+  std::size_t minBytes = 5;
+  if (info.Length() > 2 && info[2].IsNumber()) {
+    double m = info[2].As<Napi::Number>().DoubleValue();
+    if (std::isfinite(m) && m >= 1 && m <= 64) minBytes = static_cast<std::size_t>(m);
+  }
+  // An instruction beginning <15 bytes before minBytes can overshoot past it —
+  // read minBytes+15 so no valid tail instruction truncates.
+  std::vector<std::uint8_t> buf;
+  try {
+    buf = ReadBytes(h, addr, minBytes + 15);
+  } catch (const std::system_error& e) {
+    auto err = Napi::Error::New(env, e.what());
+    err.Set("code", "READ_FAILED");
+    err.Set("win32code", Napi::Number::New(env, static_cast<double>(e.code().value())));
+    err.ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  auto throwAt = [&](const char* code, const std::string& msg) {
+    auto err = Napi::Error::New(env, msg);
+    err.Set("code", code);
+    err.ThrowAsJavaScriptException();
+  };
+
+  std::size_t off = 0;
+  while (off < minBytes && off < buf.size()) {
+    std::uint8_t scratch[16] = {};
+    const std::size_t avail = buf.size() - off;
+    std::memcpy(scratch, buf.data() + off, avail < sizeof(scratch) ? avail : sizeof(scratch));
+    hde64s hs{};
+    unsigned int len = hde64_disasm(scratch, &hs);
+    if (len == 0 || (hs.flags & F_ERROR)) {
+      char msg[128];
+      std::snprintf(msg, sizeof(msg),
+                    "hookSteal: undecodable instruction at +%zu — refusing to steal", off);
+      throwAt("HOOK_STEAL", msg);
+      return env.Null();
+    }
+    if (off + len > buf.size()) {
+      char msg[128];
+      std::snprintf(msg, sizeof(msg),
+                    "hookSteal: truncated instruction at +%zu — cannot cover %zu bytes", off, minBytes);
+      throwAt("HOOK_STEAL", msg);
+      return env.Null();
+    }
+    const bool ripRel = (hs.flags & F_MODRM) && hs.modrm_mod == 0 &&
+                        hs.modrm_rm == 5;
+    if ((hs.flags & F_RELATIVE) || ripRel) {
+      char msg[160];
+      const char* which = (hs.flags & F_RELATIVE) ? "relative branch/call" : "RIP-relative operand";
+      std::snprintf(msg, sizeof(msg),
+                    "hookSteal: stolen instruction at +%zu (opcode %02X%s) is %s — copying it to a "
+                    "trampoline would produce a wild jump/read; hook at a different offset or an "
+                    "instruction-aligned site without position-relative operands",
+                    off, hs.opcode2 ? hs.opcode2 : hs.opcode,
+                    hs.opcode2 ? " (0F map)" : "", which);
+      throwAt("HOOK_RELOCATE", msg);
+      return env.Null();
+    }
+    off += len;
+  }
+  if (off < minBytes) {
+    char msg[128];
+    std::snprintf(msg, sizeof(msg),
+                  "hookSteal: only %zu decodable bytes at 0x%llX — need >= %zu",
+                  off, static_cast<unsigned long long>(addr), minBytes);
+    throwAt("HOOK_STEAL", msg);
+    return env.Null();
+  }
+  auto o = Napi::Object::New(env);
+  o.Set("length", Napi::Number::New(env, static_cast<double>(off)));
+  o.Set("bytes", Napi::Buffer<std::uint8_t>::Copy(env, buf.data(), off));
+  return o;
 }
 
 // ---------- v2.1 additions ----------
@@ -712,6 +1019,19 @@ static Napi::Value NtSuspendResume(const Napi::CallbackInfo& info, bool suspend)
     return env.Null();
   }
   DWORD pid = info[0].As<Napi::Number>().Uint32Value();
+  // QA4-C3: suspending OUR OWN process freezes the JS engine — even though
+  // NtSuspendProcess skips the calling thread, every other thread (including
+  // any that would resume us) is suspended and the object can never reach
+  // resumeProcess(). Suspend on self-pid is an unrecoverable deadlock; refuse
+  // with a clear error. Resume on self-pid is harmless — it just clears
+  // suspend counts on our own threads.
+  if (suspend && pid == GetCurrentProcessId()) {
+    auto err = Napi::Error::New(env,
+        "refusing to suspend the calling process (self-suspend deadlock)");
+    err.Set("code", "SELF_SUSPEND");
+    err.ThrowAsJavaScriptException();
+    return env.Null();
+  }
   HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
   if (!ntdll) return Napi::Boolean::New(env, false);
   using NtProcFn = LONG (NTAPI*)(HANDLE);
@@ -791,7 +1111,21 @@ Napi::Value WaitForExitAsync(const Napi::CallbackInfo& info) {
   DWORD timeout = INFINITE;
   if (info.Length() > 1 && info[1].IsNumber()) {
     double t = info[1].As<Napi::Number>().DoubleValue();
-    if (std::isfinite(t) && t >= 0 && t <= 0xFFFFFFFE) timeout = static_cast<DWORD>(t);
+    // QA4-H1: a negative timeout would wrap DWORD and become a ~49-day
+    // blocking wait. Reject negatives/NaN; Infinity stays INFINITE by design.
+    if (!std::isfinite(t)) {
+      if (std::isinf(t) && t > 0) { timeout = INFINITE; }
+      else {
+        Napi::RangeError::New(env, "timeoutMs must be >= 0 (Infinity allowed)")
+            .ThrowAsJavaScriptException();
+        return env.Null();
+      }
+    } else if (t < 0) {
+      Napi::RangeError::New(env, "timeoutMs must be >= 0 (Infinity allowed)")
+          .ThrowAsJavaScriptException();
+      return env.Null();
+    } else if (t > 0xFFFFFFFE) timeout = INFINITE;
+    else timeout = static_cast<DWORD>(t);
   }
   auto deferred = Napi::Promise::Deferred::New(env);
   auto promise = deferred.Promise();
@@ -928,6 +1262,26 @@ public:
     attached_ = true;
     DebugSetProcessKillOnExit(FALSE);
 
+    // QA4-M3 (lifecycle): wrap all post-attach phases so ANY C++ exception
+    // (bad_alloc under a flooding target, length_error in hits_/armed_
+    // growth) still runs disarm+drain+Stop. Without this the debuggee is
+    // left attached with armed Dr7 breakpoints and suspended threads — the
+    // next write to the watched addr would fire an unhandled #DB and kill it.
+    try {
+      RunPhases();
+    } catch (const std::exception& e) {
+      CleanupDebuggee();
+      SetError(std::string("findWhatWrites failed: ") + e.what());
+      return;
+    } catch (...) {
+      CleanupDebuggee();
+      SetError("findWhatWrites failed: unknown exception");
+      return;
+    }
+    CleanupDebuggee();
+  }
+
+  void RunPhases() {
     const ULONGLONG armDeadline = GetTickCount64() + 500;
     const ULONGLONG deadline = GetTickCount64() + timeoutMs_;
 
@@ -956,12 +1310,16 @@ public:
       if (!WaitForDebugEvent(&ev, left > 25 ? 25 : (DWORD)left)) continue;
       ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, HandleEvent(ev));
     }
+  }
 
-    // Phase 3: disarm every armed thread (restoring ORIGINAL Dr regs — the
-    // target may legitimately use its own hw breakpoints), drain pending
-    // events, disarm any stragglers hit mid-disarm, drain again, detach.
-    // Everything runs on this thread — DebugActiveProcess/Continue/DebugStop
-    // are debugger-thread-bound.
+  // Phase 3: disarm every armed thread (restoring ORIGINAL Dr regs — the
+  // target may legitimately use its own hw breakpoints), drain pending
+  // events, disarm any stragglers hit mid-disarm, drain again, detach.
+  // Everything runs on this thread — DebugActiveProcess/Continue/DebugStop
+  // are debugger-thread-bound. Idempotent: runs only while attached_ and is
+  // invoked from every Execute() exit path (normal + exception).
+  void CleanupDebuggee() {
+    if (!attached_) return;
     auto disarmAll = [this]() {
       for (auto& at : armed_) {
         HANDLE t = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT |
@@ -1049,7 +1407,12 @@ private:
       }
       case CREATE_THREAD_DEBUG_EVENT: {
         const DWORD tid = ev.dwThreadId;
-        HANDLE t = ev.u.CreateThread.hThread; // owned by debuggee, NOT us
+        // QA4-m4: hThread here is system-owned (unlike CREATE_PROCESS's hFile
+        // which the debugger must close). Microsoft's debug samples and docs
+        // never close it — the system cleans it up on EXIT_THREAD. Verified:
+        // do NOT close; closing could later collide with a recycled handle
+        // value the debugger also sees. Disarm uses OpenThread-by-tid anyway.
+        HANDLE t = ev.u.CreateThread.hThread;
         ArmOnHandle(tid, t);
         return DBG_CONTINUE;
       }
@@ -1192,6 +1555,26 @@ Napi::Value FindWhatWritesAsync(const Napi::CallbackInfo& info) {
     double m = info[4].As<Napi::Number>().DoubleValue();
     if (std::isfinite(m) && m >= 1) maxHits = m > 1024 ? 1024u : static_cast<unsigned>(m);
   }
+
+  // QA4-H7: CONTEXT/Dr registers use the x64 struct — on a WoW64 (32-bit)
+  // target Get/SetThreadContext operate on WOW64_CONTEXT and the arm would
+  // silently corrupt the debuggee or never fire. Refuse up front (same
+  // pattern as injectDll).
+  {
+    HANDLE ph = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (ph) {
+      BOOL wow = FALSE;
+      IsWow64Process(ph, &wow);
+      CloseHandle(ph);
+      if (wow) {
+        Napi::Error::New(env,
+            "findWhatWrites does not support WoW64 (32-bit) targets")
+            .ThrowAsJavaScriptException();
+        return env.Null();
+      }
+    }
+  }
+
   auto deferred = Napi::Promise::Deferred::New(env);
   auto promise = deferred.Promise();
   auto* w = new FindWhatWritesWorker(env, std::move(deferred), pid, addr, size,

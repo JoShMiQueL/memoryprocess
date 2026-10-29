@@ -34,6 +34,9 @@ static Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("enableDebugPrivilege", Napi::Function::New(env, mp::EnableDebugPrivilegeSync));
   exports.Set("waitForExit", Napi::Function::New(env, mp::WaitForExitAsync));
   exports.Set("findWhatWrites", Napi::Function::New(env, mp::FindWhatWritesAsync));
+  exports.Set("hookSteal", Napi::Function::New(env, mp::HookStealSync));
+  exports.Set("writeProtectedMemory", Napi::Function::New(env, mp::WriteProtectedMemorySync));
+  exports.Set("currentThreadId", Napi::Function::New(env, mp::CurrentThreadIdSync));
   return exports;
 }
 

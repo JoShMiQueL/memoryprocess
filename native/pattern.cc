@@ -77,30 +77,47 @@ public:
         start_(start), end_(end), valueMode_(true), onlyWritable_(onlyWritable),
         alignment_(alignment) {}
 
+  ~ScanWorker() override { if (proc_) CloseHandle(proc_); }
+
   void Execute() override {
     proc_ = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, pid_);
     if (!proc_) { SetError("OpenProcess failed (pid gone or access denied)"); return; }
 
-    const std::uintptr_t limit = end_ ? end_ : USER_TOP;
-    MEMORY_BASIC_INFORMATION mbi{};
-    std::uintptr_t addr = start_;
-    while (addr < limit) {
-      if (!VirtualQueryEx(proc_, reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi))) break;
-      const std::uintptr_t rBase = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
-      const std::uintptr_t rEnd = rBase + mbi.RegionSize;
-      if (mbi.RegionSize == 0) break;
-      const bool ok = valueMode_
-          ? (onlyWritable_ ? RegionWritable(mbi) : RegionReadable(mbi) ||
-             ((mbi.State == MEM_COMMIT) && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))))
-          : (onlyReadable_ ? RegionReadable(mbi)
-                           : ((mbi.State == MEM_COMMIT) && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))));
-      if (ok) {
-        // clamp window to [start_, limit)
-        const std::uintptr_t s = rBase > start_ ? rBase : start_;
-        const std::uintptr_t e = rEnd < limit ? rEnd : limit;
-        if (s < e) ScanRange(s, e);
+    // QA4 lifecycle-M1: a C++ exception (bad_alloc in hits_ growth or the
+    // per-chunk vector) escaping Execute() used to skip CloseHandle — a real
+    // handle leak under memory pressure, every scan call. Guard all exits.
+    try {
+      const std::uintptr_t limit = end_ ? end_ : USER_TOP;
+      MEMORY_BASIC_INFORMATION mbi{};
+      std::uintptr_t addr = start_;
+      while (addr < limit) {
+        if (!VirtualQueryEx(proc_, reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi))) break;
+        const std::uintptr_t rBase = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
+        const std::uintptr_t rEnd = rBase + mbi.RegionSize;
+        if (mbi.RegionSize == 0) break;
+        const bool ok = valueMode_
+            ? (onlyWritable_ ? RegionWritable(mbi) : RegionReadable(mbi) ||
+               ((mbi.State == MEM_COMMIT) && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))))
+            : (onlyReadable_ ? RegionReadable(mbi)
+                             : ((mbi.State == MEM_COMMIT) && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))));
+        if (ok) {
+          // clamp window to [start_, limit)
+          const std::uintptr_t s = rBase > start_ ? rBase : start_;
+          const std::uintptr_t e = rEnd < limit ? rEnd : limit;
+          if (s < e) ScanRange(s, e);
+        }
+        addr = rEnd;
       }
-      addr = rEnd;
+    } catch (const std::exception& e) {
+      CloseHandle(proc_);
+      proc_ = nullptr;
+      SetError(std::string("scan failed: ") + e.what());
+      return;
+    } catch (...) {
+      CloseHandle(proc_);
+      proc_ = nullptr;
+      SetError("scan failed: unknown exception");
+      return;
     }
     CloseHandle(proc_);
     proc_ = nullptr;

@@ -21,9 +21,11 @@ export type {
 export {
   MemoryProcessError,
   ProcessNotFoundError,
+  ProcessClosedError,
   AccessDeniedError,
   ReadError,
   WriteError,
   ScanError,
   InjectError,
+  InvalidSchemaError,
 } from './errors.js';

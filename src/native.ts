@@ -62,7 +62,7 @@ interface Native {
   resumeThread(tid: number): boolean;
   readSafe(handle: number, address: number, size: number): Buffer;
   flushInstructions(handle: number, address: number, size: number): boolean;
-  injectDll(pid: number, dllPath: string): boolean;
+  injectDll(pid: number, dllPath: string, timeoutMs?: number): boolean;
   ejectDll(pid: number, moduleBase: number): boolean;
   queryAddress(
     handle: number,
@@ -115,7 +115,31 @@ interface Native {
     handle: number,
     address: number,
     count: number,
-  ): { offset: number; length: number }[];
+  ): { offset: number; length: number; relative: boolean }[];
+  /**
+   * Walk instructions at `address` until `minBytes` are covered, refusing
+   * position-relative instructions (rel branches/calls, RIP-relative
+   * operands) that can't be safely copied to a trampoline stub.
+   * Throws `HOOK_STEAL`/`HOOK_RELOCATE` — returns the stolen bytes.
+   */
+  hookSteal(
+    handle: number,
+    address: number,
+    minBytes?: number,
+  ): { length: number; bytes: Buffer };
+  /**
+   * Per-region VirtualProtectEx→write→restore across the whole write span —
+   * records each region's real old protection before writing, restores each
+   * individually. `restored=false` means part of the span is left weakened.
+   */
+  writeProtectedMemory(
+    handle: number,
+    address: number,
+    buffer: Buffer,
+    protection?: number,
+  ): { ok: boolean; restored: boolean; protected: boolean };
+  /** Current thread id (TID) — used to refuse self-suspend. */
+  currentThreadId(): number;
   suspendProcess(pid: number): boolean;
   resumeProcess(pid: number): boolean;
   enableDebugPrivilege(): boolean;
@@ -156,17 +180,24 @@ const candidates = [
 ];
 
 export const native: Native = (() => {
+  // Keep the last real load error: a .node that EXISTS but fails to load
+  // (missing VC++ CRT, arch or N-API mismatch, wrong Node ABI) must not be
+  // reported as "not found" — surface the underlying loader message.
+  let lastErr: unknown;
   for (const path of candidates) {
     try {
       return require(path) as Native;
-    } catch {
-      /* try next */
+    } catch (e) {
+      lastErr = e;
     }
   }
   try {
     return require('node-gyp-build')(join(__dir, '..')) as Native;
-  } catch {
-    /* fall through */
+  } catch (e) {
+    lastErr = lastErr ?? e;
   }
-  throw new Error('memoryprocess native addon not found (run `bun run build`)');
+  const detail = lastErr instanceof Error ? `: ${lastErr.message}` : '';
+  throw new Error(
+    `memoryprocess native addon failed to load (run \`bun run build\`)${detail}`,
+  );
 })();

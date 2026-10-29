@@ -54,9 +54,12 @@ describe('getThreadContext / setThreadContext', () => {
     }
   });
 
-  test('getThreadContext on bogus tid returns null', () => {
+  test('getThreadContext on foreign tid throws FOREIGN_TID (was: returns null)', () => {
     using proc = Process.open(victim.pid);
-    expect(proc.getThreadContext(0x7ffffffe)).toBeNull();
+    // H5 fix: cross-process tids are rejected, not silently queried.
+    expect(() => proc.getThreadContext(0x7ffffffe)).toThrow(
+      /FOREIGN_TID|does not belong/,
+    );
   });
 });
 
@@ -100,7 +103,7 @@ describe('callRemote / resolveExport', () => {
       expect(proc.callRemote(echo!, 0x1234)).toBe(0x1234);
     } finally {
       try {
-        proc.ejectDll('testdll');
+        proc.ejectDll('testdll.dll');
       } catch {
         /* best effort */
       }

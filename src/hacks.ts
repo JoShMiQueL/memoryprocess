@@ -5,7 +5,7 @@ import type {
   ScanValueOptions,
   ScanValueType,
 } from './process.js';
-import { ScanError, MemoryProcessError } from './errors.js';
+import { ScanError, MemoryProcessError, InvalidSchemaError } from './errors.js';
 
 /* ------------------------------------------------------------------ */
 /* Types                                                                */
@@ -678,6 +678,14 @@ interface CompiledField {
   width: number; // bytes
 }
 
+/**
+ * Cap on the schema span (maxOffset+width). snapshot() reads the WHOLE span
+ * in one readBuffer — a pathologically sparse schema
+ * (`{a:[0], b:[0x4000000]}`) would issue a single enormous RPM. 64KiB
+ * already covers real game structs; wider spans should use readMany().
+ */
+const MAX_SCHEMA_SPAN = 64 * 1024;
+
 function compileSchema(
   schema: EntitySchema,
   ptrSize: number,
@@ -692,6 +700,12 @@ function compileSchema(
     fields.push({ name, offset, type, width: w });
     if (offset + w > size) size = offset + w;
   }
+  if (size > MAX_SCHEMA_SPAN)
+    throw new InvalidSchemaError(
+      `schema span too large (${size} bytes > ${MAX_SCHEMA_SPAN}) — ` +
+        `snapshot() would read the whole span in one RPM; use readMany() ` +
+        `or split the schema`,
+    );
   return { fields, size };
 }
 
@@ -767,7 +781,12 @@ function decodeField(
   return r(buf, off);
 }
 
-/** A typed, `readRegion`-backed view over an entity in remote memory. */
+/**
+ * A typed, `readRegion`-backed view over an entity in remote memory.
+ * NOTE: `read(name)` costs ONE RPM per call — in hot loops prefer
+ * {@link Entity.snapshot} (one readBuffer for all fields) over
+ * `e.read('x'); e.read('y'); e.read('z')` (three RPMs).
+ */
 export class Entity {
   private fields: CompiledField[];
   private size: number;
