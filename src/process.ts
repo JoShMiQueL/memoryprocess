@@ -1609,6 +1609,35 @@ export class Process implements Disposable {
   }
 
   /**
+   * Named pointer-chain table — a CE-style address list. Each entry is
+   * `[base, ...offsets]` where `base` is a bigint, a number, or a
+   * `"module+rva"` string. Returns a typed map of {@link Address} objects,
+   * so chains are defined once and read/written by name:
+   * ```ts
+   * const p = proc.pointers({
+   *   health: ['game.exe+0x1F2A3C', 0x10, 0x28, 0x8],
+   *   mana:   ['game.exe+0x1F2A3C', 0x18, 0x30],
+   *   money:  [moneyBase, 0x8],
+   * });
+   * p.health.readInt32();   // 87
+   * p.mana.writeInt32(999);
+   * ```
+   * Entries resolve lazily — nothing touches memory until a `.read`/`.resolve`.
+   */
+  pointers<
+    T extends Record<
+      string,
+      readonly [base: number | bigint | string, ...chain: number[]]
+    >,
+  >(defs: T): { [K in keyof T]: Address } {
+    const out: Record<string, Address> = {};
+    for (const [name, [base, ...chain]] of Object.entries(defs)) {
+      out[name] = new Address(this, base, chain);
+    }
+    return out as { [K in keyof T]: Address };
+  }
+
+  /**
    * Typed view over a region. `snapshot()` does ONE `readBuffer` covering the
    * whole schema and decodes every field locally — cheap per-frame read for
    * ESP/aimbot loops. `read(name)`/`write(name, v)` hit live memory.

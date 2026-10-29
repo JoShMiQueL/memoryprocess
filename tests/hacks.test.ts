@@ -41,6 +41,24 @@ describe('proc.addr — CE-style mod+rva + chain', () => {
     using proc = Process.open(victim.pid);
     expect(() => proc.addr('nosuch.dll+0x10')).toThrow();
   });
+
+  test('proc.pointers — named chain table, lazy + reusable', () => {
+    using proc = Process.open(victim.pid);
+    const mod = proc.module('victim.exe')!;
+    const p = proc.pointers({
+      i32: [
+        `victim.exe+0x${(Number(victim.addr.g_i32) - mod.base).toString(16)}`,
+      ],
+      counter: [victim.addr.g_counter],
+      viaChain: [victim.addr.g_ppp, 0, 0, 0],
+    });
+    expect(p.i32.readInt32()).toBe(0x12345678);
+    expect(p.counter.readInt32()).toBeGreaterThan(0);
+    expect(p.viaChain.resolve()).toBe(victim.addr.g_i32);
+    // reusable — same chain read twice hits live memory again
+    p.counter.writeInt32(777);
+    expect(p.counter.readInt32()).toBe(777);
+  });
 });
 
 describe('Offsets — cs2-dumper + hazedumper + property access', () => {
