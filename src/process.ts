@@ -1,9 +1,15 @@
+import { writeFileSync } from 'node:fs'
 import { native } from './native.js'
 import { ProcessNotFoundError, AccessDeniedError, ReadError, WriteError, ScanError, InjectError } from './errors.js'
 
 export interface ProcessInfo { pid: number; name: string }
 export interface ModuleInfo { base: number; size: number; path: string }
 export interface Region { baseAddress: number; size: number; protection: number; type: number }
+export interface ThreadContext {
+  rip: bigint; rsp: bigint; rbp: bigint
+  dr0: bigint; dr1: bigint; dr2: bigint; dr3: bigint; dr7: bigint
+  eflags: bigint
+}
 
 export const Protection = {
   PAGE_NOACCESS: 0x01,
@@ -264,6 +270,12 @@ export class Process implements Disposable {
   get pointerSize(): number { return this.isWow64 ? 4 : 8 }
   /** Thread IDs owned by this process. */
   threads(): number[] { this.assertOpen(); return native.listThreads(this.pid) }
+  /**
+   * First thread reported by the Toolhelp snapshot for this process — in
+   * practice the main/owner thread for typical targets. Returns null when the
+   * process has no threads.
+   */
+  get mainThread(): number | null { this.assertOpen(); return this.threads()[0] ?? null }
   /** Suspend a thread by id. */
   suspendThread(tid: number): boolean { return native.suspendThread(tid) }
   /** Resume a thread by id. */
@@ -272,6 +284,216 @@ export class Process implements Disposable {
   suspendAll(): number[] { const t = this.threads(); t.forEach(id => this.suspendThread(id)); return t }
   /** Resume all threads of this process. */
   resumeAll(): void { this.threads().forEach(id => this.resumeThread(id)) }
+
+  // ---- tier-3: query / context / remote call ----
+
+  /**
+   * VirtualQueryEx on a single address. Returns region info including
+   * `allocationBase` and `state` (MEM_COMMIT 0x1000 / MEM_RESERVE 0x2000 /
+   * MEM_FREE 0x10000), or null when the address is invalid/unmapped.
+   */
+  queryAddress(addr: number | bigint): (Region & { allocationBase: number; state: number }) | null {
+    this.assertOpen()
+    return native.queryAddress(this.#handle, Number(addr))
+  }
+
+  /**
+   * Full thread context (x64) including debug registers.
+   * Suspend the thread first ({@link suspendThread}) for a stable snapshot.
+   * Returns null if the thread cannot be opened.
+   */
+  getThreadContext(tid: number): ThreadContext | null {
+    this.assertOpen()
+    return native.getThreadContext(tid)
+  }
+
+  /**
+   * Patch selected context fields and write the context back.
+   * Suspend the thread first. Accepted fields: rip, rsp, rbp, dr0..dr3, dr7,
+   * eflags (number|bigint).
+   */
+  setThreadContext(tid: number, ctx: Partial<Record<keyof ThreadContext, number | bigint>>): boolean {
+    this.assertOpen()
+    return native.setThreadContext(tid, ctx)
+  }
+
+  /**
+   * Execute `fnAddr` on a new remote thread with `param` as lpParameter and
+   * wait up to `timeoutMs` for it to exit. Returns the thread exit code, or
+   * null on failure/timeout.
+   */
+  callRemote(fnAddr: bigint | number, param = 0, timeoutMs = 10000): number | null {
+    this.assertOpen()
+    return native.callRemote(this.pid, fnAddr, param, timeoutMs)
+  }
+
+  // ---- tier-3: hardware breakpoints ----
+
+  /**
+   * Arm a hardware EXECUTION breakpoint in Dr{slot} (0-3) on thread `tid`.
+   * Sets RW=00 (execute) and LEN for `size` (1|2|4|8; only 1 is meaningful for
+   * execution breakpoints) plus the local-enable bit in Dr7.
+   * Suspend the thread first, then resume with {@link resumeThread}.
+   */
+  hwBreakpoint(tid: number, addr: bigint | number, slot: 0 | 1 | 2 | 3, size: 1 | 2 | 4 | 8 = 1): boolean {
+    this.assertOpen()
+    const ctx = this.getThreadContext(tid)
+    if (!ctx) return false
+    const lenBits = size === 1 ? 0n : size === 2 ? 1n : size === 8 ? 3n : 2n // 00=1 01=2 10=8 11=4
+    const shift = BigInt(16 + slot * 4)
+    let dr7 = ctx.dr7
+    dr7 &= ~(0xfn << shift)                 // clear RW+LEN for this slot
+    dr7 |= lenBits << shift                 // RW=00 (exec), LEN=size
+    dr7 |= 1n << BigInt(slot * 2)           // local enable L{slot}
+    const patch: Record<string, bigint> = { dr7 }
+    patch[`dr${slot}`] = BigInt(addr)
+    return this.setThreadContext(tid, patch)
+  }
+
+  /** Clear Dr{slot} (address + enable/RW/LEN bits in Dr7) on thread `tid`. */
+  clearHwBreakpoint(tid: number, slot: 0 | 1 | 2 | 3): boolean {
+    this.assertOpen()
+    const ctx = this.getThreadContext(tid)
+    if (!ctx) return false
+    const shift = BigInt(16 + slot * 4)
+    let dr7 = ctx.dr7
+    dr7 &= ~(0xfn << shift)
+    dr7 &= ~(3n << BigInt(slot * 2))        // clear local+global enable
+    const patch: Record<string, bigint> = { dr7 }
+    patch[`dr${slot}`] = 0n
+    return this.setThreadContext(tid, patch)
+  }
+
+  // ---- tier-3: code cave ----
+
+  /**
+   * Find the first run of >= minLen consecutive 0x00 or 0xCC bytes inside
+   * committed, executable regions. When `opts.module` is set the search is
+   * bounded to that module; `opts.start`/`opts.end` bound it explicitly.
+   * Returns the cave address or null.
+   */
+  findCodeCave(minLen: number, opts: { module?: string; start?: number | bigint; end?: number | bigint } = {}): bigint | null {
+    this.assertOpen()
+    const EXEC = Protection.PAGE_EXECUTE | Protection.PAGE_EXECUTE_READ |
+      Protection.PAGE_EXECUTE_READWRITE | Protection.PAGE_EXECUTE_WRITECOPY
+    const MEM_COMMIT = 0x1000
+
+    let lo = opts.start !== undefined ? BigInt(opts.start) : 0n
+    let hi = opts.end !== undefined ? BigInt(opts.end) : 0x7fffffffffffffn
+    if (opts.module) {
+      const m = this.module(opts.module)
+      if (!m) return null
+      lo = BigInt(m.base); hi = BigInt(m.base + m.size)
+    }
+
+    for (const r of this.regions()) {
+      if ((r.protection & EXEC) === 0) continue
+      const rLo = BigInt(r.baseAddress), rHi = rLo + BigInt(r.size)
+      const s = rLo > lo ? rLo : lo, e = rHi < hi ? rHi : hi
+      if (s >= e) continue
+      const q = this.queryAddress(s)
+      if (!q || q.state !== MEM_COMMIT) {
+        // regions() only returns committed allocations in practice, but confirm
+        if (!q) continue
+      }
+      const buf = this.readSafe(s, Number(e - s))
+      let run = 0
+      for (let i = 0; i < buf.length; i++) {
+        const b = buf[i]!
+        if (b === 0x00 || b === 0xcc) {
+          if (++run >= minLen) return s + BigInt(i - run + 1)
+        } else run = 0
+      }
+    }
+    return null
+  }
+
+  // ---- tier-3: exports / strings / arrays / misc ----
+
+  /**
+   * Resolve an exported symbol in a remote module by parsing its PE export
+   * table via remote reads. Returns the absolute address or null.
+   */
+  resolveExport(moduleName: string, exportName: string): bigint | null {
+    this.assertOpen()
+    const m = this.module(moduleName)
+    if (!m) return null
+    const base = BigInt(m.base)
+    try {
+      const hdr = this.readSafe(base, 0x1000)
+      if (hdr.readUInt16LE(0) !== 0x5a4d) return null // MZ
+      const peOff = hdr.readUInt32LE(0x3c)
+      const nt = this.readSafe(base + BigInt(peOff), 0x400)
+      if (nt.readUInt32LE(0) !== 0x4550) return null // PE\0\0
+      const magic = nt.readUInt16LE(0x18)
+      const ddBase = magic === 0x20b ? 0x88 : 0x78 // optional-header data dir offset
+      const expRva = nt.readUInt32LE(ddBase)
+      if (!expRva) return null
+      const exp = this.readSafe(base + BigInt(expRva), 0x28)
+      const nNames = exp.readUInt32LE(0x18)
+      const namesRva = exp.readUInt32LE(0x20)
+      const ordsRva = exp.readUInt32LE(0x24)
+      const funcsRva = exp.readUInt32LE(0x1c)
+      const names = this.readSafe(base + BigInt(namesRva), nNames * 4)
+      for (let i = 0; i < nNames; i++) {
+        const nameRva = names.readUInt32LE(i * 4)
+        const name = this.readString(base + BigInt(nameRva), 256)
+        if (name === exportName) {
+          const ord = this.readSafe(base + BigInt(ordsRva) + BigInt(i * 2), 2).readUInt16LE(0)
+          const fnRva = this.readSafe(base + BigInt(funcsRva) + BigInt(ord * 4), 4).readUInt32LE(0)
+          return base + BigInt(fnRva)
+        }
+      }
+      return null
+    } catch { return null }
+  }
+
+  /** Write `str` (encoded, default utf8) plus a NUL terminator at `addr`. */
+  writeString(addr: number | bigint, str: string, encoding: 'utf8' | 'ascii' = 'utf8'): boolean {
+    return this.writeBuffer(addr, Buffer.concat([Buffer.from(str, encoding), Buffer.from([0])]))
+  }
+
+  /** Write `str` as UTF-16LE plus a 00 00 terminator at `addr`. */
+  writeWideString(addr: number | bigint, str: string): boolean {
+    return this.writeBuffer(addr, Buffer.concat([Buffer.from(str, 'utf16le'), Buffer.from([0, 0])]))
+  }
+
+  /**
+   * Read `count` contiguous values of `type` in a single read.
+   * Returns number[] for int32/uint32, Float32Array for 'float',
+   * Float64Array for 'double'.
+   */
+  readArray(addr: number | bigint, type: 'int32' | 'uint32' | 'float' | 'double', count: number): number[] | Float32Array | Float64Array {
+    const width = type === 'double' ? 8 : 4
+    const buf = this.readBuffer(addr, count * width)
+    const aligned = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)
+    switch (type) {
+      case 'int32': return Array.from(new Int32Array(aligned, 0, count))
+      case 'uint32': return Array.from(new Uint32Array(aligned, 0, count))
+      case 'float': return new Float32Array(aligned, 0, count)
+      case 'double': return new Float64Array(aligned, 0, count)
+    }
+  }
+
+  /** Module (from {@link modules}) whose [base, base+size) contains `addr`. */
+  moduleFromAddress(addr: number | bigint): ModuleInfo | null {
+    this.assertOpen()
+    const a = BigInt(addr)
+    return this.modules().find(m => a >= BigInt(m.base) && a < BigInt(m.base + m.size)) ?? null
+  }
+
+  /**
+   * Dump a loaded module's committed image (readSafe) to `outPath`.
+   * Returns `outPath` on success.
+   */
+  dumpModule(name: string, outPath: string): string {
+    this.assertOpen()
+    const m = this.module(name)
+    if (!m) throw new ReadError(0n)
+    const buf = this.readSafe(m.base, m.size)
+    writeFileSync(outPath, buf)
+    return outPath
+  }
 
   // ---- helpers ----
   /** Resolve a RIP-relative address: `hit + offset + 4 + rel32` (x64 mov/movaps sigs). */

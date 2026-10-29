@@ -23,6 +23,10 @@ static Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("flushInstructions", Napi::Function::New(env, mp::FlushInstructionsSync));
   exports.Set("injectDll", Napi::Function::New(env, mp::InjectDllSync));
   exports.Set("ejectDll", Napi::Function::New(env, mp::EjectDllSync));
+  exports.Set("queryAddress", Napi::Function::New(env, mp::QueryAddressSync));
+  exports.Set("getThreadContext", Napi::Function::New(env, mp::GetThreadContextSync));
+  exports.Set("setThreadContext", Napi::Function::New(env, mp::SetThreadContextSync));
+  exports.Set("callRemote", Napi::Function::New(env, mp::CallRemoteSync));
   return exports;
 }
 

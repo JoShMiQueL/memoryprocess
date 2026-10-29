@@ -30,4 +30,10 @@ Napi::Value FlushInstructionsSync(const Napi::CallbackInfo& info);// FlushInstru
 Napi::Value InjectDllSync(const Napi::CallbackInfo& info);        // LoadLibraryA remote thread
 Napi::Value EjectDllSync(const Napi::CallbackInfo& info);         // FreeLibrary remote thread
 
+// v2 Tier-3 additions
+Napi::Value QueryAddressSync(const Napi::CallbackInfo& info);     // single VirtualQueryEx
+Napi::Value GetThreadContextSync(const Napi::CallbackInfo& info); // GetThreadContext (CONTEXT_ALL|DEBUG)
+Napi::Value SetThreadContextSync(const Napi::CallbackInfo& info); // patch fields + SetThreadContext
+Napi::Value CallRemoteSync(const Napi::CallbackInfo& info);       // CreateRemoteThread + wait
+
 } // namespace mp

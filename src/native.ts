@@ -27,6 +27,17 @@ interface Native {
   flushInstructions(handle: number, address: number, size: number): boolean
   injectDll(pid: number, dllPath: string): boolean
   ejectDll(pid: number, moduleBase: number): boolean
+  queryAddress(handle: number, address: number): {
+    baseAddress: number; allocationBase: number; size: number
+    protection: number; state: number; type: number
+  } | null
+  getThreadContext(tid: number): {
+    rip: bigint; rsp: bigint; rbp: bigint
+    dr0: bigint; dr1: bigint; dr2: bigint; dr3: bigint; dr7: bigint
+    eflags: bigint
+  } | null
+  setThreadContext(tid: number, ctx: Partial<Record<'rip' | 'rsp' | 'rbp' | 'dr0' | 'dr1' | 'dr2' | 'dr3' | 'dr7' | 'eflags', number | bigint>>): boolean
+  callRemote(pid: number, fnAddress: number | bigint, param: number | bigint, timeoutMs?: number): number | null
 }
 
 // Resolution order: dist/memoryprocess.node (built/packaged) -> prebuilds via

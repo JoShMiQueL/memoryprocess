@@ -423,4 +423,148 @@ Napi::Value EjectDllSync(const Napi::CallbackInfo& info) {
   return Napi::Boolean::New(env, true);
 }
 
+// ---------- v2 Tier-3 ----------
+
+// queryAddress(handle, address) -> { baseAddress, allocationBase, size,
+//   protection, state, type } | null
+Napi::Value QueryAddressSync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 2 || !info[0].IsNumber() || !info[1].IsNumber()) {
+    Napi::TypeError::New(env, "expected (handle,address)").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+  HANDLE h = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(info[0].As<Napi::Number>().DoubleValue()));
+  auto addr = static_cast<std::uintptr_t>(info[1].As<Napi::Number>().DoubleValue());
+  MEMORY_BASIC_INFORMATION mbi{};
+  if (!VirtualQueryEx(h, reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)))
+    return env.Null();
+  if (mbi.State == MEM_FREE) return env.Null(); // unmapped
+  auto o = Napi::Object::New(env);
+  o.Set("baseAddress", Napi::Number::New(env, static_cast<double>(reinterpret_cast<std::uintptr_t>(mbi.BaseAddress))));
+  o.Set("allocationBase", Napi::Number::New(env, static_cast<double>(reinterpret_cast<std::uintptr_t>(mbi.AllocationBase))));
+  o.Set("size", Napi::Number::New(env, static_cast<double>(mbi.RegionSize)));
+  o.Set("protection", Napi::Number::New(env, static_cast<double>(mbi.Protect)));
+  o.Set("state", Napi::Number::New(env, static_cast<double>(mbi.State)));
+  o.Set("type", Napi::Number::New(env, static_cast<double>(mbi.Type)));
+  return o;
+}
+
+static bool GetFullContext(DWORD tid, CONTEXT& ctx) {
+  HANDLE t = OpenThread(THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, tid);
+  if (!t) {
+    // Some systems require SET_CONTEXT rights for debug registers read too;
+    // retry with ALL access on failure.
+    t = OpenThread(THREAD_ALL_ACCESS, FALSE, tid);
+    if (!t) return false;
+  }
+  ZeroMemory(&ctx, sizeof(ctx));
+  ctx.ContextFlags = CONTEXT_ALL | CONTEXT_DEBUG_REGISTERS;
+  BOOL ok = GetThreadContext(t, &ctx);
+  CloseHandle(t);
+  return ok != 0;
+}
+
+// getThreadContext(tid) -> { rip,rsp,rbp,dr0,dr1,dr2,dr3,dr7,eflags } | null
+// NOTE: caller is expected to have suspended the thread first.
+Napi::Value GetThreadContextSync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 1 || !info[0].IsNumber()) {
+    Napi::TypeError::New(env, "expected (tid)").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+  DWORD tid = info[0].As<Napi::Number>().Uint32Value();
+  CONTEXT ctx{};
+  if (!GetFullContext(tid, ctx)) return env.Null();
+  auto o = Napi::Object::New(env);
+  o.Set("rip", Napi::BigInt::New(env, static_cast<std::uint64_t>(ctx.Rip)));
+  o.Set("rsp", Napi::BigInt::New(env, static_cast<std::uint64_t>(ctx.Rsp)));
+  o.Set("rbp", Napi::BigInt::New(env, static_cast<std::uint64_t>(ctx.Rbp)));
+  o.Set("dr0", Napi::BigInt::New(env, static_cast<std::uint64_t>(ctx.Dr0)));
+  o.Set("dr1", Napi::BigInt::New(env, static_cast<std::uint64_t>(ctx.Dr1)));
+  o.Set("dr2", Napi::BigInt::New(env, static_cast<std::uint64_t>(ctx.Dr2)));
+  o.Set("dr3", Napi::BigInt::New(env, static_cast<std::uint64_t>(ctx.Dr3)));
+  o.Set("dr7", Napi::BigInt::New(env, static_cast<std::uint64_t>(ctx.Dr7)));
+  o.Set("eflags", Napi::BigInt::New(env, static_cast<std::uint64_t>(ctx.EFlags)));
+  return o;
+}
+
+static bool JsToU64(const Napi::Value& v, std::uint64_t& out) {
+  if (v.IsBigInt()) { bool ls; out = v.As<Napi::BigInt>().Uint64Value(&ls); return true; }
+  if (v.IsNumber()) { out = static_cast<std::uint64_t>(v.As<Napi::Number>().DoubleValue()); return true; }
+  return false;
+}
+
+// setThreadContext(tid, { rip?, rsp?, dr0?, dr1?, dr2?, dr3?, dr7? }) -> boolean
+// Reads the current context, patches provided fields, writes it back.
+Napi::Value SetThreadContextSync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 2 || !info[0].IsNumber() || !info[1].IsObject()) {
+    Napi::TypeError::New(env, "expected (tid, ctx)").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+  DWORD tid = info[0].As<Napi::Number>().Uint32Value();
+  auto patch = info[1].As<Napi::Object>();
+
+  CONTEXT ctx{};
+  if (!GetFullContext(tid, ctx)) return Napi::Boolean::New(env, false);
+
+  std::uint64_t v;
+  auto set = [&](const char* name, std::uint64_t& field) {
+    if (patch.Has(name) && JsToU64(patch.Get(name), v)) field = v;
+  };
+  set("rip", *reinterpret_cast<std::uint64_t*>(&ctx.Rip));
+  set("rsp", *reinterpret_cast<std::uint64_t*>(&ctx.Rsp));
+  set("rbp", *reinterpret_cast<std::uint64_t*>(&ctx.Rbp));
+  set("dr0", *reinterpret_cast<std::uint64_t*>(&ctx.Dr0));
+  set("dr1", *reinterpret_cast<std::uint64_t*>(&ctx.Dr1));
+  set("dr2", *reinterpret_cast<std::uint64_t*>(&ctx.Dr2));
+  set("dr3", *reinterpret_cast<std::uint64_t*>(&ctx.Dr3));
+  set("dr7", *reinterpret_cast<std::uint64_t*>(&ctx.Dr7));
+  std::uint64_t efl = ctx.EFlags;
+  if (patch.Has("eflags") && JsToU64(patch.Get("eflags"), v)) ctx.EFlags = static_cast<DWORD>(v);
+  (void)efl;
+
+  HANDLE t = OpenThread(THREAD_SET_CONTEXT, FALSE, tid);
+  if (!t) {
+    t = OpenThread(THREAD_ALL_ACCESS, FALSE, tid);
+    if (!t) return Napi::Boolean::New(env, false);
+  }
+  ctx.ContextFlags = CONTEXT_ALL | CONTEXT_DEBUG_REGISTERS;
+  BOOL ok = SetThreadContext(t, &ctx);
+  CloseHandle(t);
+  return Napi::Boolean::New(env, ok != 0);
+}
+
+// callRemote(pid, fnAddress, param, timeoutMs?) -> exitCode | null
+Napi::Value CallRemoteSync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (info.Length() < 3 || !info[0].IsNumber()) {
+    Napi::TypeError::New(env, "expected (pid, fnAddress, param[, timeoutMs])").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+  DWORD pid = info[0].As<Napi::Number>().Uint32Value();
+  std::uint64_t fn = 0, param = 0;
+  if (!JsToU64(info[1], fn) || !JsToU64(info[2], param)) {
+    Napi::TypeError::New(env, "fnAddress and param must be number|bigint").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+  DWORD timeout = 10000;
+  if (info.Length() > 3 && info[3].IsNumber())
+    timeout = info[3].As<Napi::Number>().Uint32Value();
+
+  HANDLE h = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION, FALSE, pid);
+  if (!h) return env.Null();
+  HANDLE t = CreateRemoteThread(h, nullptr, 0,
+      reinterpret_cast<LPTHREAD_START_ROUTINE>(static_cast<std::uintptr_t>(fn)),
+      reinterpret_cast<LPVOID>(static_cast<std::uintptr_t>(param)), 0, nullptr);
+  if (!t) { CloseHandle(h); return env.Null(); }
+  DWORD wr = WaitForSingleObject(t, timeout);
+  DWORD code = 0;
+  bool ok = (wr == WAIT_OBJECT_0) && GetExitCodeThread(t, &code);
+  CloseHandle(t);
+  CloseHandle(h);
+  if (!ok) return env.Null();
+  return Napi::Number::New(env, static_cast<double>(code));
+}
+
 } // namespace mp
