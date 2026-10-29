@@ -59,6 +59,22 @@ describe('proc.addr — CE-style mod+rva + chain', () => {
     p.counter.writeInt32(777);
     expect(p.counter.readInt32()).toBe(777);
   });
+
+  test("bare module name: addr('victim.exe', rva, ...chain)", () => {
+    using proc = Process.open(victim.pid);
+    const mod = proc.module('victim.exe')!;
+    const rva = Number(victim.addr.g_ppp) - mod.base;
+    // 'mod', rva, chain — equivalent to 'mod+rva' + chain
+    const a = proc.addr('victim.exe', rva, 0, 0, 0);
+    expect(a.resolve()).toBe(victim.addr.g_i32);
+    // and the pointers() def form
+    const p = proc.pointers({
+      i32: ['victim.exe', Number(victim.addr.g_i32) - mod.base],
+      chained: ['victim.exe', rva, 0, 0, 0],
+    });
+    expect(p.i32.readInt32()).toBe(0x12345678);
+    expect(p.chained.resolve()).toBe(victim.addr.g_i32);
+  });
 });
 
 describe('Offsets — cs2-dumper + hazedumper + property access', () => {

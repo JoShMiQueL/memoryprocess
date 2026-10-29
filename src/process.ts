@@ -1600,9 +1600,14 @@ export class Process implements Disposable {
 
   /**
    * Fluent pointer-chain address. `base` may be a bigint, a numeric address,
-   * or a Cheat-Engine `"module+rva"` string (`'client.dll+0xDEB99C'`).
-   * `chain` offsets are walked like {@link resolvePointer}.
-   * `proc.addr('game.exe+0x1F2A3C', 0x10, 0x28, 0x8).readInt32()`
+   * a `"module+rva"` string, or a bare module name — in which case `chain[0]`
+   * is the RVA (added to the module base, not dereferenced) and the rest is
+   * the pointer chain:
+   * ```ts
+   * proc.addr('game.exe', 0x1F2A3C, 0x10, 0x28, 0x8).readInt32()
+   * proc.addr('game.exe+0x1F2A3C', 0x10, 0x28, 0x8).readInt32()  // same
+   * proc.addr(bigintBase, 0x10, 0x28, 0x8).readInt32()
+   * ```
    */
   addr(base: number | bigint | string, ...chain: number[]): Address {
     return new Address(this, base, chain);
@@ -1610,13 +1615,14 @@ export class Process implements Disposable {
 
   /**
    * Named pointer-chain table — a CE-style address list. Each entry is
-   * `[base, ...offsets]` where `base` is a bigint, a number, or a
-   * `"module+rva"` string. Returns a typed map of {@link Address} objects,
-   * so chains are defined once and read/written by name:
+   * `[base, ...offsets]` where `base` is a bigint, a number, a `"module+rva"`
+   * string, or a bare module name (then `offsets[0]` is the RVA). Returns a
+   * typed map of {@link Address} objects, so chains are defined once and
+   * read/written by name:
    * ```ts
    * const p = proc.pointers({
-   *   health: ['game.exe+0x1F2A3C', 0x10, 0x28, 0x8],
-   *   mana:   ['game.exe+0x1F2A3C', 0x18, 0x30],
+   *   health: ['game.exe', 0x1F2A3C, 0x10, 0x28, 0x8],
+   *   mana:   ['game.exe', 0x1F2A3C, 0x18, 0x30],
    *   money:  [moneyBase, 0x8],
    * });
    * p.health.readInt32();   // 87

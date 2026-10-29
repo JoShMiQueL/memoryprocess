@@ -110,6 +110,15 @@ function resolveBase(proc: Process, base: number | bigint | string): bigint {
   return BigInt(mod.base) + BigInt(rvaStr);
 }
 
+/** True when `base` is a bare module name (no `+`) that resolves to a loaded module. */
+function isModuleName(proc: Process, base: number | bigint | string): boolean {
+  return (
+    typeof base === 'string' &&
+    !base.includes('+') &&
+    proc.module(base.trim()) !== undefined
+  );
+}
+
 /**
  * A lazily-resolved pointer-chain address. `add()`/`deref()` build the chain;
  * `resolve()`/`ptr()` walk it once via {@link Process.resolvePointer}.
@@ -124,9 +133,12 @@ export class Address {
 
   /**
    * `base` may be:
-   * - a bigint/number virtual address, or
-   * - a Cheat-Engine-style `"module+rva"` string (`'client.dll+0xDEB99C'`,
-   *   `'game.exe+1F2A3C'`) — resolved against `proc.module(mod).base`.
+   * - a bigint/number virtual address,
+   * - a `"module+rva"` string (`'client.dll+0xDEB99C'`), or
+   * - a **bare module name** (`'client.dll'`) — then `chain[0]` is the RVA
+   *   (added to the module base, not dereferenced) and `chain[1:]` is the
+   *   pointer chain. So `new Address(p, 'game.exe', [0x1F2A3C, 0x10])` ≡
+   *   `new Address(p, 'game.exe+0x1F2A3C', [0x10])`.
    * `chain` offsets are walked like {@link Process.resolvePointer}: every
    * offset except the last dereferences the pointer, the last is added.
    */
@@ -135,8 +147,15 @@ export class Address {
     base: number | bigint | string,
     chain: readonly number[] = [],
   ) {
-    this.base = resolveBase(proc, base);
-    this.chain = chain;
+    if (isModuleName(proc, base)) {
+      const mod = proc.module((base as string).trim())!;
+      const [rva, ...rest] = chain;
+      this.base = BigInt(mod.base) + BigInt(rva ?? 0);
+      this.chain = rest;
+    } else {
+      this.base = resolveBase(proc, base);
+      this.chain = chain;
+    }
   }
 
   /** Derive a new Address with `off` appended to the chain. Immutable. */
