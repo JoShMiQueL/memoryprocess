@@ -1,5 +1,10 @@
 # memoryprocess
 
+> **MOVED** -- this repo is archived. Development continues at
+> **[github.com/memoryprocess/memoryprocess](https://github.com/memoryprocess/memoryprocess)**
+> and the packages are published as **`@memoryprocess/{bindings,core,cli,mcp}`**
+> (`npm i @memoryprocess/core`).
+
 [![npm](https://img.shields.io/npm/v/memoryprocess)](https://www.npmjs.com/package/memoryprocess)
 [![CI](https://github.com/JoShMiQueL/memoryprocess/actions/workflows/ci.yml/badge.svg)](https://github.com/JoShMiQueL/memoryprocess/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.md)
